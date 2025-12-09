@@ -3,6 +3,8 @@ import re
 import zipfile
 from typing import List, Optional
 from urllib.parse import urlparse
+from pathlib import Path
+from datetime import datetime
 
 import httpx
 from fastapi import Body, FastAPI, Form, HTTPException, Request
@@ -34,6 +36,11 @@ def _slugify(value: str) -> str:
     return value or "page"
 
 
+def _clamp_max_pages(raw_value: Optional[int]) -> int:
+    pages = raw_value or 1
+    return max(1, min(pages, 500))
+
+
 @app.post("/generate")
 async def generate_knowledgebase(
     url: str = Form(...),
@@ -41,7 +48,7 @@ async def generate_knowledgebase(
     allowed_hosts: Optional[str] = Form(None),
     path_prefixes: Optional[str] = Form(None),
 ):
-    pages_to_crawl = max(1, max_pages or 1)
+    pages_to_crawl = _clamp_max_pages(max_pages)
     allowed = _parse_list_field(allowed_hosts)
     prefixes = _parse_list_field(path_prefixes)
 
@@ -56,6 +63,14 @@ async def generate_knowledgebase(
 
     if not markdown_content:
         raise HTTPException(status_code=400, detail="No content could be extracted from the provided URL.")
+
+    parsed = urlparse(url)
+    hostname = _slugify(parsed.hostname or "output")
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    outputs_dir = Path("outputs")
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    output_filename = outputs_dir / f"{hostname}__{timestamp}.md"
+    output_filename.write_text(markdown_content, encoding="utf-8")
 
     headers = {"Content-Disposition": "attachment; filename=knowledgebase.md"}
     return Response(
@@ -72,7 +87,7 @@ async def crawl_preview(
     allowed_hosts: Optional[str] = Form(None),
     path_prefixes: Optional[str] = Form(None),
 ):
-    pages_to_crawl = max(1, max_pages or 1)
+    pages_to_crawl = _clamp_max_pages(max_pages)
     allowed = _parse_list_field(allowed_hosts)
     prefixes = _parse_list_field(path_prefixes)
 
@@ -119,7 +134,7 @@ async def download_selected(payload=Body(...)):
 
     crawler = AsyncCrawler(
         start_url=url,
-        max_pages=max(1, max_pages or 1),
+        max_pages=_clamp_max_pages(max_pages),
         include_subdomains=True,
         allowed_hosts=allowed_hosts,
         path_prefixes=path_prefixes,
