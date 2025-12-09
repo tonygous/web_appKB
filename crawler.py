@@ -296,30 +296,41 @@ class AsyncCrawler:
         return self._combine_pages(pages)
 
     def _combine_pages(self, pages: List[PageRecord]) -> str:
-        summary_lines = ["<!-- Crawl summary:"]
+        """Собираем финальный markdown: summary + контент по хостам."""
+        # summary (в HTML-комментарии, чтобы не мешать рендеру)
+        summary_lines: List[str] = ["<!-- Crawl summary:"]
         summary_lines.append(f"Total pages: {len(pages)}")
         summary_lines.append(f"Errors: {len(self.errors)}")
-        if self.timed_out:
-            summary_lines.append("Note: Crawl truncated due to timeout.")
         if self.errors:
-            summary_lines.append("Error samples:")
-            for error in self.errors[:20]:
-                status_part = f" ({error['status']})" if error.get("status") else ""
-                summary_lines.append(f"  - {error['url']} - {error['reason']}{status_part}")
+            for err in self.errors[:20]:
+                url = err.get("url", "")
+                reason = err.get("reason", "")
+                status = err.get("status", "")
+                if status:
+                    summary_lines.append(f"  - {url} ({reason} {status})")
+                else:
+                    summary_lines.append(f"  - {url} ({reason})")
+        if self.timed_out:
+            summary_lines.append(
+                f"Crawl timed out after {self.crawl_timeout:.0f} seconds."
+            )
         summary_lines.append("-->")
 
+        # группируем страницы по host
         pages_by_host: Dict[str, List[PageRecord]] = {}
         for page in pages:
-            pages_by_host.setdefault(page.host, []).append(page)
+            host = page.host or self.root_domain or "unknown host"
+            pages_by_host.setdefault(host, []).append(page)
 
-        markdown_parts = []
+        markdown_parts: List[str] = []
         for host in sorted(pages_by_host.keys()):
-            host_section = [f"# {host or 'unknown host'}"]
+            host_section: List[str] = [f"# {host}"]
             for page in pages_by_host[host]:
                 title = page.title or page.path or page.url
-                page_section = f"## {title}\n\n{page.markdown.strip()}"
-                host_section.append(page_section)
+                body = page.markdown.strip()
+                host_section.append(f"## {title}\n\n{body}")
             markdown_parts.append("\n\n".join(host_section))
 
         body = "\n\n---\n\n".join(markdown_parts)
         return "\n".join(summary_lines) + "\n\n" + body
+
