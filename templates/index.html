@@ -97,6 +97,9 @@
             cursor: pointer;
             box-shadow: 0 12px 30px rgba(79, 70, 229, 0.25);
             transition: transform 0.15s ease, box-shadow 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
         }
         button:hover {
             transform: translateY(-1px);
@@ -139,6 +142,15 @@
         .loading button {
             pointer-events: none;
         }
+        .alert {
+            background: #fef2f2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+            padding: 10px 12px;
+            border-radius: 12px;
+            font-size: 14px;
+            display: none;
+        }
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
@@ -165,19 +177,22 @@
         </div>
         <form id="crawl-form">
             <div>
-                <label for="start_url">Start URL</label>
-                <input type="url" id="start_url" name="start_url" placeholder="https://example.com" required>
+                <label for="url-input">Website URL</label>
+                <input type="url" id="url-input" name="url" placeholder="Enter website URL (e.g. https://docs.mexem.com)" required>
             </div>
             <div class="actions">
-                <div style="flex:1">
-                    <label for="max_pages">Max Pages</label>
-                    <input type="number" id="max_pages" name="max_pages" min="1" max="100" value="10" required>
+                <div style="flex:1; max-width: 220px;">
+                    <label for="max-pages-input">Max pages</label>
+                    <input type="number" id="max-pages-input" name="max_pages" min="1" max="500" value="20" required>
                 </div>
                 <div style="align-self:flex-end; display:flex; align-items:center; gap:10px;">
-                    <button type="submit" id="generate-btn">Generate</button>
-                    <div class="spinner" id="spinner"></div>
+                    <button type="submit" id="generate-btn">
+                        <div class="spinner" id="spinner" aria-hidden="true"></div>
+                        <span id="button-text">Generate knowledge base</span>
+                    </button>
                 </div>
             </div>
+            <div class="alert" id="alert-box" role="alert" aria-live="polite"></div>
             <p class="helper">Downloads a consolidated <strong>knowledgebase.md</strong> file containing content from internal pages.</p>
         </form>
         <div class="preview">
@@ -190,12 +205,32 @@
         const form = document.getElementById('crawl-form');
         const spinner = document.getElementById('spinner');
         const generateBtn = document.getElementById('generate-btn');
+        const buttonText = document.getElementById('button-text');
+        const alertBox = document.getElementById('alert-box');
+
+        const setLoading = (isLoading) => {
+            if (isLoading) {
+                form.classList.add('loading');
+                spinner.style.display = 'inline-block';
+                generateBtn.disabled = true;
+                buttonText.textContent = 'Crawling website…';
+            } else {
+                form.classList.remove('loading');
+                spinner.style.display = 'none';
+                generateBtn.disabled = false;
+                buttonText.textContent = 'Generate knowledge base';
+            }
+        };
+
+        const showError = (message) => {
+            alertBox.textContent = message;
+            alertBox.style.display = message ? 'block' : 'none';
+        };
 
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
-            form.classList.add('loading');
-            spinner.style.display = 'inline-block';
-            generateBtn.disabled = true;
+            showError('');
+            setLoading(true);
 
             const formData = new FormData(form);
             try {
@@ -205,7 +240,17 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to generate knowledge base');
+                    let message = 'Failed to generate knowledge base. Please try again.';
+                    try {
+                        const errorData = await response.json();
+                        if (errorData && errorData.detail) {
+                            message = errorData.detail;
+                        }
+                    } catch (jsonError) {
+                        // If parsing fails, keep the default message.
+                    }
+                    showError(message);
+                    return;
                 }
 
                 const blob = await response.blob();
@@ -218,11 +263,9 @@
                 link.remove();
                 window.URL.revokeObjectURL(url);
             } catch (error) {
-                alert(error.message);
+                showError('An unexpected error occurred. Please try again.');
             } finally {
-                form.classList.remove('loading');
-                spinner.style.display = 'none';
-                generateBtn.disabled = false;
+                setLoading(false);
             }
         });
     </script>
