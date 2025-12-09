@@ -4,3 +4,4 @@ httpx
 beautifulsoup4
 html2text
 jinja2
+python-multipart
