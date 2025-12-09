@@ -1,7 +1,9 @@
 import asyncio
+import logging
+import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, List, Optional, Sequence, Set, Tuple
+from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
@@ -44,14 +46,22 @@ class AsyncCrawler:
         start_url: str,
         max_pages: int = 50,
         timeout: float = 10.0,
+        crawl_timeout: float = 90.0,
         include_subdomains: bool = True,
         allowed_hosts: Optional[Sequence[str]] = None,
         path_prefixes: Optional[Sequence[str]] = None,
+        max_depth: int = 4,
+        max_concurrent_requests: int = 5,
+        respect_robots: bool = False,
     ) -> None:
         self.start_url = self._normalize_url(start_url)
-        self.max_pages = max_pages
+        self.max_pages = max(1, min(max_pages, 500))
         self.timeout = timeout
+        self.crawl_timeout = crawl_timeout
         self.include_subdomains = include_subdomains
+        self.max_depth = max(0, max_depth)
+        self.max_concurrent_requests = max(1, max_concurrent_requests)
+        self.respect_robots = respect_robots  # Placeholder for future robots.txt handling
 
         self.allowed_hosts = self._normalize_hosts(allowed_hosts)
         self.path_prefixes = self._normalize_prefixes(path_prefixes)
@@ -61,7 +71,11 @@ class AsyncCrawler:
 
         self.visited: Set[str] = set()
         self.enqueued: Set[str] = {self.start_url}
-        self.queue: Deque[str] = deque([self.start_url])
+        self.queue: Deque[Tuple[str, int]] = deque([(self.start_url, 0)])
+
+        self.errors: List[Dict[str, str]] = []
+        self.timed_out: bool = False
+        self.logger = logging.getLogger(__name__)
 
     def _normalize_hosts(self, hosts: Optional[Sequence[str]]) -> List[str]:
         if not hosts:
@@ -100,6 +114,10 @@ class AsyncCrawler:
         if len(parts) >= 2:
             return ".".join(parts[-2:])
         return hostname.lower()
+
+    def _record_error(self, url: str, reason: str, status: str = "") -> None:
+        self.errors.append({"url": url, "reason": reason, "status": status})
+        self.logger.warning("Error fetching %s: %s %s", url, reason, status)
 
     def _is_internal_link(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -152,8 +170,11 @@ class AsyncCrawler:
             content_type = response.headers.get("content-type", "")
             if response.status_code == httpx.codes.OK and "text/html" in content_type:
                 return response.text
-        except httpx.HTTPError:
-            return None
+            self._record_error(url, "non-200 or non-html", str(response.status_code))
+        except httpx.TimeoutException:
+            self._record_error(url, "timeout")
+        except httpx.HTTPError as exc:  # pragma: no cover - safety net
+            self._record_error(url, "http_error", str(getattr(exc.response, "status_code", "")))
         return None
 
     def _clean_html(self, html: str, url: str) -> Tuple[str, str]:
@@ -213,34 +234,52 @@ class AsyncCrawler:
 
     async def crawl_with_pages(self) -> List[PageRecord]:
         pages: List[PageRecord] = []
-        concurrency_limit = 5
+        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+        start_time = time.monotonic()
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "Web-to-KnowledgeBase/1.0 (+https://example.com)"}
+        ) as client:
             while self.queue and len(pages) < self.max_pages:
+                if time.monotonic() - start_time > self.crawl_timeout:
+                    self.timed_out = True
+                    self.logger.warning("Crawl timed out after %.2f seconds", self.crawl_timeout)
+                    break
+
                 tasks = []
+                task_urls: List[Tuple[str, int]] = []
                 while (
                     self.queue
-                    and len(tasks) < concurrency_limit
+                    and len(tasks) < self.max_concurrent_requests
                     and len(pages) + len(tasks) < self.max_pages
                 ):
-                    current_url = self.queue.popleft()
+                    current_url, depth = self.queue.popleft()
                     if current_url in self.visited:
                         continue
                     if not self._is_allowed_url(current_url):
                         continue
                     self.visited.add(current_url)
-                    tasks.append(asyncio.create_task(self._process_url(client, current_url)))
+                    task_urls.append((current_url, depth))
+
+                    async def _task(url=current_url):
+                        async with semaphore:
+                            return await self._process_url(client, url)
+
+                    tasks.append(asyncio.create_task(_task()))
 
                 if not tasks:
                     break
 
                 results = await asyncio.gather(*tasks)
-                for result in results:
+                for (current_url, depth), result in zip(task_urls, results):
                     if not result:
                         continue
                     page_record, links = result
                     pages.append(page_record)
                     for link in links:
+                        next_depth = depth + 1
+                        if next_depth > self.max_depth:
+                            continue
                         if len(self.visited) + len(self.queue) >= self.max_pages:
                             break
                         if not self._is_allowed_url(link):
@@ -248,7 +287,7 @@ class AsyncCrawler:
                         if link in self.visited or link in self.enqueued:
                             continue
                         self.enqueued.add(link)
-                        self.queue.append(link)
+                        self.queue.append((link, next_depth))
 
         return pages
 
@@ -257,8 +296,30 @@ class AsyncCrawler:
         return self._combine_pages(pages)
 
     def _combine_pages(self, pages: List[PageRecord]) -> str:
-        markdown_parts = []
+        summary_lines = ["<!-- Crawl summary:"]
+        summary_lines.append(f"Total pages: {len(pages)}")
+        summary_lines.append(f"Errors: {len(self.errors)}")
+        if self.timed_out:
+            summary_lines.append("Note: Crawl truncated due to timeout.")
+        if self.errors:
+            summary_lines.append("Error samples:")
+            for error in self.errors[:20]:
+                status_part = f" ({error['status']})" if error.get("status") else ""
+                summary_lines.append(f"  - {error['url']} - {error['reason']}{status_part}")
+        summary_lines.append("-->")
+
+        pages_by_host: Dict[str, List[PageRecord]] = {}
         for page in pages:
-            section = f"# {page.title}\n\n{page.markdown.strip()}"
-            markdown_parts.append(section)
-        return "\n\n---\n\n".join(markdown_parts)
+            pages_by_host.setdefault(page.host, []).append(page)
+
+        markdown_parts = []
+        for host in sorted(pages_by_host.keys()):
+            host_section = [f"# {host or 'unknown host'}"]
+            for page in pages_by_host[host]:
+                title = page.title or page.path or page.url
+                page_section = f"## {title}\n\n{page.markdown.strip()}"
+                host_section.append(page_section)
+            markdown_parts.append("\n\n".join(host_section))
+
+        body = "\n\n---\n\n".join(markdown_parts)
+        return "\n".join(summary_lines) + "\n\n" + body
