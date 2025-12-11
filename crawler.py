@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -106,6 +107,14 @@ class AsyncCrawler:
         parsed = parsed._replace(fragment="")
         normalized = urlunparse(parsed)
         return normalized.rstrip("/") or normalized
+
+    @staticmethod
+    def _normalize_markdown(content: str) -> str:
+        if not content:
+            return ""
+        collapsed = re.sub(r"\n{3,}", "\n\n", content)
+        trimmed_lines = [line.rstrip() for line in collapsed.splitlines()]
+        return "\n".join(trimmed_lines).strip()
 
     def _extract_root_domain(self, hostname: Optional[str]) -> str:
         if not hostname:
