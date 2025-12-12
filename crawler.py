@@ -41,6 +41,7 @@ class PageRecord:
     path: str
     title: str
     markdown: str
+    clean_text_chars: int = 0
     used_readability: bool = False
 
 
@@ -508,9 +509,44 @@ class AsyncCrawler:
             path=path or "/",
             title=title or "",
             markdown=markdown,
+            clean_text_chars=len(markdown.strip()),
             used_readability=used_readability,
         )
         return page_record, links
+
+    async def fetch_and_clean_page(
+        self, client: httpx.AsyncClient, url: str
+    ) -> Optional[PageRecord]:
+        normalized_url = self._normalize_url(url)
+        if not normalized_url:
+            return None
+        if self._has_ignored_extension(normalized_url):
+            return None
+        if not self._is_allowed_url(normalized_url):
+            return None
+
+        content = await self._fetch_content(client, normalized_url)
+        if not content:
+            return None
+
+        title, markdown, used_readability = self._clean_html(
+            content, normalized_url
+        )
+        parsed_url = urlparse(normalized_url)
+        host = parsed_url.hostname or self.root_domain or ""
+        path = parsed_url.path or "/"
+        if parsed_url.query:
+            path = f"{path}?{parsed_url.query}"
+
+        return PageRecord(
+            url=normalized_url,
+            host=host,
+            path=path or "/",
+            title=title or "",
+            markdown=markdown,
+            clean_text_chars=len(markdown.strip()),
+            used_readability=used_readability,
+        )
 
     async def crawl_with_pages(self) -> List[PageRecord]:
         pages: List[PageRecord] = []
