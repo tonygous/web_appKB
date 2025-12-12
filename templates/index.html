@@ -367,12 +367,34 @@
             <div>
                 <label for="allowed-hosts-input">Allowed domains / subdomains</label>
                 <input type="text" id="allowed-hosts-input" name="allowed_hosts" placeholder="e.g. mexem.com, support.mexem.com">
-                <p class="helper">Comma or space separated. Leave blank to include the root domain and subdomains.</p>
+                <p class="helper">Comma or space separated. Use "Include subdomains" below to broaden the crawl.</p>
             </div>
             <div>
                 <label for="path-prefixes-input">Path prefixes (optional)</label>
                 <input type="text" id="path-prefixes-input" name="path_prefixes" placeholder="e.g. /, /help, /docs">
                 <p class="helper">Only crawl URLs that start with these prefixes.</p>
+            </div>
+            <div>
+                <label>Crawl options</label>
+                <div class="options-grid">
+                    <label class="checkbox-row">
+                        <input type="checkbox" id="use-sitemap-input" name="use_sitemap" checked>
+                        Use sitemap.xml
+                    </label>
+                    <label class="checkbox-row">
+                        <input type="checkbox" id="respect-robots-input" name="respect_robots" checked>
+                        Respect robots.txt
+                    </label>
+                    <label class="checkbox-row">
+                        <input type="checkbox" id="include-subdomains-input" name="include_subdomains">
+                        Include subdomains
+                    </label>
+                    <div>
+                        <label for="max-depth-input">Max depth</label>
+                        <input type="number" id="max-depth-input" name="max_depth" min="0" max="6" value="3">
+                        <p class="helper">How many link levels to follow (0 = only the start page).</p>
+                    </div>
+                </div>
             </div>
             <div>
                 <label>Content extraction</label>
@@ -504,6 +526,10 @@
         const diagnosticsErrors = document.getElementById('diagnostics-errors');
         const diagnosticsItems = document.getElementById('diagnostics-items');
         const diagnosticsMeta = document.getElementById('diagnostics-meta');
+        const useSitemapInput = document.getElementById('use-sitemap-input');
+        const respectRobotsInput = document.getElementById('respect-robots-input');
+        const includeSubdomainsInput = document.getElementById('include-subdomains-input');
+        const maxDepthInput = document.getElementById('max-depth-input');
         const stripLinksInput = document.getElementById('strip-links-input');
         const stripImagesInput = document.getElementById('strip-images-input');
         const readabilityInput = document.getElementById('readability-input');
@@ -683,6 +709,10 @@
             setLoading(true);
 
             const formData = new FormData(form);
+            formData.set('use_sitemap', useSitemapInput.checked ? 'true' : 'false');
+            formData.set('respect_robots', respectRobotsInput.checked ? 'true' : 'false');
+            formData.set('include_subdomains', includeSubdomainsInput.checked ? 'true' : 'false');
+            formData.set('max_depth', maxDepthInput.value || '3');
             formData.set('strip_links', stripLinksInput.checked ? 'true' : 'false');
             formData.set('strip_images', stripImagesInput.checked ? 'true' : 'false');
             formData.set('readability_fallback', readabilityInput.checked ? 'true' : 'false');
@@ -733,6 +763,10 @@
             setScanLoading(true);
 
             const formData = new FormData(form);
+            formData.set('use_sitemap', useSitemapInput.checked ? 'true' : 'false');
+            formData.set('respect_robots', respectRobotsInput.checked ? 'true' : 'false');
+            formData.set('include_subdomains', includeSubdomainsInput.checked ? 'true' : 'false');
+            formData.set('max_depth', maxDepthInput.value || '3');
             formData.set('strip_links', stripLinksInput.checked ? 'true' : 'false');
             formData.set('strip_images', stripImagesInput.checked ? 'true' : 'false');
             formData.set('readability_fallback', readabilityInput.checked ? 'true' : 'false');
@@ -952,6 +986,10 @@
                 max_pages: Number(document.getElementById('max-pages-input').value || 10),
                 allowed_hosts: parseInputList(allowedHostsInput),
                 path_prefixes: parseInputList(pathPrefixesInput),
+                use_sitemap: useSitemapInput.checked,
+                respect_robots: respectRobotsInput.checked,
+                include_subdomains: includeSubdomainsInput.checked,
+                max_depth: Number(maxDepthInput.value || 3),
                 strip_links: stripLinksInput.checked,
                 strip_images: stripImagesInput.checked,
                 readability_fallback: readabilityInput.checked,
