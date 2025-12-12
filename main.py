@@ -1,5 +1,6 @@
 import io
 import re
+import subprocess
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -10,11 +11,32 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, Up
 from fastapi.responses import Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from crawler import AsyncCrawler
 from connectors.importer import ImportConnector
+from crawler import AsyncCrawler
+
+BUILD_TIME = datetime.utcnow().isoformat() + "Z"
+TEMPLATES_DIR = Path("templates")
+
+
+def _detect_git_sha() -> str:
+    try:
+        output = subprocess.check_output(
+            [
+                "git",
+                "rev-parse",
+                "--short",
+                "HEAD",
+            ]
+        )
+        return output.decode().strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+GIT_SHA = _detect_git_sha()
 
 app = FastAPI(title="Web-to-KnowledgeBase")
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 last_run_info = {
@@ -28,7 +50,28 @@ last_run_info = {
 
 @app.get("/")
 async def read_root(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    template_path = TEMPLATES_DIR / "index.html"
+    if not template_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Template not found: {template_path}",
+        )
+
+    return templates.TemplateResponse(request, "index.html", {"request": request})
+
+
+@app.get("/healthz")
+async def healthcheck():
+    return {"status": "ok"}
+
+
+@app.get("/version")
+async def version():
+    return {
+        "app": "Web-to-KnowledgeBase",
+        "git_sha": GIT_SHA,
+        "build_time": BUILD_TIME,
+    }
 
 
 @app.get("/debug/last-run")
@@ -120,6 +163,16 @@ def _clamp_min_text_chars(raw_value: Optional[int]) -> int:
     except (TypeError, ValueError):
         return 600
     return max(200, min(value, 5000))
+
+
+def _clamp_max_depth(raw_value: Optional[int]) -> int:
+    if raw_value is None:
+        return 3
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 3
+    return max(1, min(value, 10))
 
 
 def _update_last_run(crawler: AsyncCrawler, pages: List, total_chars: int) -> None:
@@ -348,9 +401,7 @@ async def download_selected(payload=Body(...)):
     added_files = 0
 
     async with crawler._create_client() as client:
-        with zipfile.ZipFile(
-            buffer, mode="w", compression=zipfile.ZIP_DEFLATED
-        ) as zip_file:
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
             for page in pages:
                 page_url = page.get("url")
                 filename = page.get("filename") or f"page-{added_files}.md"
@@ -396,6 +447,32 @@ def _build_index_markdown(pages: List) -> str:
                 lines.append(f"- [{title}]({filename})")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def _group_pages_by_host(pages: List) -> dict:
+    grouped: dict = {}
+    for page in pages:
+        host = page.get("host") if isinstance(page, dict) else getattr(page, "host", "")
+        grouped.setdefault(host or "", []).append(page)
+    return grouped
+
+
+def _build_grouped_markdown(pages: List) -> str:
+    grouped = _group_pages_by_host(pages)
+    sections = []
+    for host, host_pages in grouped.items():
+        entries = [f"# {host}"]
+        for page in host_pages:
+            title = page.get("title") if isinstance(page, dict) else getattr(page, "title", "")
+            path = page.get("path") if isinstance(page, dict) else getattr(page, "path", "")
+            url = page.get("url") if isinstance(page, dict) else getattr(page, "url", "")
+            markdown = (
+                page.get("markdown") if isinstance(page, dict) else getattr(page, "markdown", "")
+            )
+            heading = title or path or url or "Page"
+            entries.append(f"## {heading}\n\n{markdown}\n")
+        sections.append("\n\n".join(entries))
+    return "\n\n---\n\n".join(sections).strip() + "\n"
 
 
 def _prepare_crawler_options(payload):
