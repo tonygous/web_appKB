@@ -95,6 +95,15 @@ def _clamp_max_pages(raw_value: Optional[int]) -> int:
     return max(1, min(pages, 500))
 
 
+def _parse_render_mode(value: Optional[str]) -> str:
+    if not value:
+        return "http"
+    normalized = str(value).strip().lower()
+    if normalized in {"http", "auto", "browser"}:
+        return normalized
+    return "http"
+
+
 @app.post("/generate")
 async def generate_knowledgebase(
     url: str = Form(...),
@@ -105,6 +114,7 @@ async def generate_knowledgebase(
     strip_images: Optional[str] = Form("true"),
     readability_fallback: Optional[str] = Form("true"),
     min_text_chars: Optional[int] = Form(600),
+    render_mode: Optional[str] = Form("http"),
 ):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
@@ -116,6 +126,7 @@ async def generate_knowledgebase(
     strip_images_bool = _parse_bool_field(strip_images, True)
     readability_bool = _parse_bool_field(readability_fallback, True)
     min_text_value = _clamp_min_text_chars(min_text_chars)
+    render_mode_value = _parse_render_mode(render_mode)
 
     crawler = AsyncCrawler(
         start_url=url,
@@ -127,6 +138,7 @@ async def generate_knowledgebase(
         strip_images=strip_images_bool,
         readability_fallback=readability_bool,
         min_text_chars=min_text_value,
+        render_mode=render_mode_value,
     )
 
     pages = await crawler.crawl_with_pages()
@@ -172,6 +184,7 @@ async def crawl_preview(
     strip_images: Optional[str] = Form("true"),
     readability_fallback: Optional[str] = Form("true"),
     min_text_chars: Optional[int] = Form(600),
+    render_mode: Optional[str] = Form("http"),
 ):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
@@ -183,6 +196,7 @@ async def crawl_preview(
     strip_images_bool = _parse_bool_field(strip_images, True)
     readability_bool = _parse_bool_field(readability_fallback, True)
     min_text_value = _clamp_min_text_chars(min_text_chars)
+    render_mode_value = _parse_render_mode(render_mode)
 
     crawler = AsyncCrawler(
         start_url=url,
@@ -194,6 +208,7 @@ async def crawl_preview(
         strip_images=strip_images_bool,
         readability_fallback=readability_bool,
         min_text_chars=min_text_value,
+        render_mode=render_mode_value,
     )
 
     pages = await crawler.crawl_with_pages()
@@ -235,6 +250,7 @@ async def download_selected(payload=Body(...)):
     strip_images = _parse_bool_field(payload.get("strip_images"), True)
     readability_fallback = _parse_bool_field(payload.get("readability_fallback"), True)
     min_text_chars = _clamp_min_text_chars(payload.get("min_text_chars"))
+    render_mode = _parse_render_mode(payload.get("render_mode"))
 
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
@@ -251,6 +267,7 @@ async def download_selected(payload=Body(...)):
         strip_images=strip_images,
         readability_fallback=readability_fallback,
         min_text_chars=min_text_chars,
+        render_mode=render_mode,
     )
 
     buffer = io.BytesIO()
@@ -266,12 +283,12 @@ async def download_selected(payload=Body(...)):
                 if not page_url or not crawler._is_allowed_url(page_url):
                     continue
 
-                content = await crawler._fetch_content(client, page_url)
-                if not content:
+                rendered = await crawler._render_page(client, page_url)
+                if not rendered:
                     continue
 
-                title, markdown, _ = crawler._clean_html(content, page_url)
-                host = page.get("host") or (urlparse(page_url).hostname or "")
+                _, title, markdown, _, _, final_url = rendered
+                host = page.get("host") or (urlparse(final_url).hostname or "")
                 heading = page.get("title") or page.get("path") or title
 
                 body = f"# {host}\n## {heading}\n\n{markdown}"

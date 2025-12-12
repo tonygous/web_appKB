@@ -5,3 +5,9 @@ A lightweight static landing page for a web application knowledge base. It inclu
 ## Running locally
 
 Open `index.html` in your browser to view the page—no additional tooling required.
+
+When using the FastAPI crawler with Playwright-powered rendering, install the browser drivers first:
+
+```
+python -m playwright install
+```
