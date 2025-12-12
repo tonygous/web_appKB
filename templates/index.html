@@ -78,6 +78,17 @@
             transition: border-color 0.2s, box-shadow 0.2s;
             background: #f9fafb;
         }
+        textarea {
+            width: 100%;
+            padding: 12px 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            font-size: 15px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            background: #f9fafb;
+            min-height: 150px;
+            resize: vertical;
+        }
         input[type="url"]:focus, input[type="number"]:focus, input[type="text"]:focus {
             border-color: #4f46e5;
             outline: none;
@@ -185,6 +196,24 @@
             border: 1px solid #e5e7eb;
             border-radius: 12px;
             background: #f9fafb;
+        }
+        .bulk-panel {
+            grid-column: span 2;
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 18px 20px;
+        }
+        .bulk-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 12px;
+        }
+        .bulk-status {
+            color: #374151;
+            font-size: 14px;
         }
         .checkbox-row {
             display: flex;
@@ -430,6 +459,30 @@
                 </button>
             </div>
         </div>
+        <div class="bulk-panel">
+            <div class="panel-header">
+                <div>
+                    <h3>Bulk URL mode</h3>
+                    <p class="helper">Paste a list of URLs to download cleaned markdown without crawling for links.</p>
+                </div>
+                <div class="badge" aria-hidden="true">Bulk</div>
+            </div>
+            <label for="bulk-urls-input">One URL per line</label>
+            <textarea id="bulk-urls-input" placeholder="https://example.com/docs/page-1&#10;https://example.com/docs/page-2"></textarea>
+            <div class="helper">Respects allowed hosts, path prefixes, and content options above.</div>
+            <div class="bulk-actions">
+                <button type="button" id="bulk-combined-btn">
+                    <div class="spinner" id="bulk-combined-spinner" aria-hidden="true"></div>
+                    <span id="bulk-combined-text">Bulk: combined .md</span>
+                </button>
+                <button type="button" id="bulk-zip-btn" class="secondary-btn">
+                    <div class="spinner" id="bulk-zip-spinner" aria-hidden="true"></div>
+                    <span id="bulk-zip-text">Bulk: per-page .zip</span>
+                </button>
+                <span class="bulk-status" id="bulk-status"></span>
+            </div>
+            <div class="alert" id="bulk-alert" role="alert" aria-live="polite"></div>
+        </div>
         <div class="diagnostics-panel">
             <div class="panel-header">
                 <div>
@@ -481,6 +534,15 @@
         const stripImagesInput = document.getElementById('strip-images-input');
         const readabilityInput = document.getElementById('readability-input');
         const minTextCharsInput = document.getElementById('min-text-chars-input');
+        const bulkUrlsInput = document.getElementById('bulk-urls-input');
+        const bulkCombinedBtn = document.getElementById('bulk-combined-btn');
+        const bulkZipBtn = document.getElementById('bulk-zip-btn');
+        const bulkCombinedSpinner = document.getElementById('bulk-combined-spinner');
+        const bulkZipSpinner = document.getElementById('bulk-zip-spinner');
+        const bulkCombinedText = document.getElementById('bulk-combined-text');
+        const bulkZipText = document.getElementById('bulk-zip-text');
+        const bulkAlert = document.getElementById('bulk-alert');
+        const bulkStatus = document.getElementById('bulk-status');
 
         let previewPages = [];
         let isDownloadingSelected = false;
@@ -530,10 +592,54 @@
             alertBox.style.display = message ? 'block' : 'none';
         };
 
+        const showBulkError = (message) => {
+            bulkAlert.textContent = message;
+            bulkAlert.style.display = message ? 'block' : 'none';
+            if (message) {
+                bulkStatus.textContent = '';
+            }
+        };
+
+        const setBulkLoading = (isLoading, target) => {
+            const isZip = target === 'zip';
+            const spinnerEl = isZip ? bulkZipSpinner : bulkCombinedSpinner;
+            const textEl = isZip ? bulkZipText : bulkCombinedText;
+            spinnerEl.style.display = isLoading ? 'inline-block' : 'none';
+            textEl.textContent = isZip
+                ? isLoading ? 'Preparing zip…' : 'Bulk: per-page .zip'
+                : isLoading ? 'Preparing markdown…' : 'Bulk: combined .md';
+            bulkCombinedBtn.disabled = isLoading;
+            bulkZipBtn.disabled = isLoading;
+        };
+
         const updateSelectedCount = () => {
             const selected = document.querySelectorAll('.page-checkbox:checked').length;
             selectedCount.textContent = `Selected: ${selected} page${selected === 1 ? '' : 's'}`;
             downloadSelectedBtn.disabled = selected === 0 || previewPages.length === 0 || isDownloadingSelected;
+        };
+
+        const parseBulkUrls = () => {
+            return bulkUrlsInput.value
+                .split(/\n+/)
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0);
+        };
+
+        const getFilenameFromDisposition = (header) => {
+            if (!header) return '';
+            const match = header.match(/filename="?([^";]+)"?/i);
+            return match ? match[1] : '';
+        };
+
+        const triggerDownload = (blob, filename) => {
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
         };
 
         const renderPreview = (pages) => {
@@ -779,6 +885,72 @@
             diagnosticsDetails.open = true;
         };
 
+        const handleBulkDownload = async (mode) => {
+            showBulkError('');
+            const urls = parseBulkUrls();
+            if (!urls.length) {
+                showBulkError('Please add at least one URL.');
+                return;
+            }
+
+            const allowedHostsInput = document.getElementById('allowed-hosts-input').value;
+            const pathPrefixesInput = document.getElementById('path-prefixes-input').value;
+
+            const payload = {
+                urls,
+                allowed_hosts: parseInputList(allowedHostsInput),
+                path_prefixes: parseInputList(pathPrefixesInput),
+                options: {
+                    strip_links: stripLinksInput.checked,
+                    strip_images: stripImagesInput.checked,
+                    use_readability: readabilityInput.checked,
+                    min_text_chars: Number(minTextCharsInput.value || 600),
+                    include_subdomains: true,
+                },
+            };
+
+            setBulkLoading(true, mode === 'zip' ? 'zip' : 'combined');
+            bulkStatus.textContent = 'Processing…';
+
+            try {
+                const response = await fetch(`/bulk/${mode}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(payload),
+                });
+
+                if (!response.ok) {
+                    let message = 'Bulk download failed. Please try again.';
+                    try {
+                        const errorData = await response.json();
+                        if (errorData && errorData.detail) {
+                            message = typeof errorData.detail === 'string' ? errorData.detail : JSON.stringify(errorData.detail);
+                        }
+                    } catch (jsonError) {
+                        // ignore
+                    }
+                    showBulkError(message);
+                    return;
+                }
+
+                const blob = await response.blob();
+                const filename =
+                    getFilenameFromDisposition(response.headers.get('content-disposition')) ||
+                    (mode === 'zip' ? 'bulk_pages.zip' : 'bulk_combined.md');
+                triggerDownload(blob, filename);
+                const pageCount = response.headers.get('x-page-count');
+                bulkStatus.textContent = pageCount
+                    ? `Downloaded ${pageCount} page${pageCount === '1' ? '' : 's'}.`
+                    : 'Download ready.';
+            } catch (error) {
+                showBulkError('An unexpected error occurred while processing URLs.');
+            } finally {
+                setBulkLoading(false, mode === 'zip' ? 'zip' : 'combined');
+            }
+        };
+
         downloadSelectedBtn.addEventListener('click', async () => {
             showError('');
             const selectedCheckboxes = Array.from(document.querySelectorAll('.page-checkbox:checked'));
@@ -866,6 +1038,9 @@
                 updateSelectedCount();
             }
         });
+
+        bulkCombinedBtn.addEventListener('click', () => handleBulkDownload('combined'));
+        bulkZipBtn.addEventListener('click', () => handleBulkDownload('zip'));
 
         diagnosticsBtn.addEventListener('click', async () => {
             diagnosticsBtn.disabled = true;

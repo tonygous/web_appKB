@@ -47,6 +47,14 @@ def _parse_list_field(raw_value: Optional[str]) -> List[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
+def _parse_list(payload_value) -> List[str]:
+    if not payload_value:
+        return []
+    if isinstance(payload_value, list):
+        return [str(item).strip() for item in payload_value if str(item).strip()]
+    return _parse_list_field(str(payload_value))
+
+
 def _slugify(value: str) -> str:
     value = value.lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
@@ -95,9 +103,25 @@ def _clamp_max_pages(raw_value: Optional[int]) -> int:
     return max(1, min(pages, 500))
 
 
-def _clamp_max_depth(raw_value: Optional[int]) -> int:
-    depth = raw_value or 3
-    return max(0, min(depth, 6))
+def _group_pages_by_host(pages):
+    grouped = {}
+    for page in pages:
+        host = page.host or "unknown-host"
+        grouped.setdefault(host, []).append(page)
+    return grouped
+
+
+def _build_grouped_markdown(pages: List) -> str:
+    grouped = _group_pages_by_host(pages)
+    parts = []
+    for host in sorted(grouped.keys()):
+        host_section = [f"# {host}"]
+        for page in grouped[host]:
+            title = page.title or page.path or page.url
+            body = page.markdown.rstrip()
+            host_section.append(f"## {title}\n\n{body}\n")
+        parts.append("\n\n".join(host_section))
+    return "\n\n---\n\n".join(parts).strip() + "\n"
 
 
 @app.post("/generate")
@@ -324,6 +348,162 @@ async def download_selected(payload=Body(...)):
 
     buffer.seek(0)
     headers = {"Content-Disposition": 'attachment; filename="knowledgebase_pages.zip"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
+def _build_index_markdown(pages: List) -> str:
+    grouped = _group_pages_by_host(pages)
+    lines = ["# Index", ""]
+    for host in sorted(grouped.keys()):
+        lines.append(f"## {host}")
+        for page in grouped[host]:
+            filename = page.get("filename", "")
+            title = page.get("title") or page.get("path") or page.get("url") or filename
+            if filename:
+                lines.append(f"- [{title}]({filename})")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _prepare_crawler_options(payload):
+    options = payload.get("options") or {}
+    strip_links = _parse_bool_field(options.get("strip_links"), True)
+    strip_images = _parse_bool_field(options.get("strip_images"), True)
+    readability_fallback = _parse_bool_field(
+        options.get("use_readability", options.get("readability_fallback")), True
+    )
+    min_text_chars = _clamp_min_text_chars(options.get("min_text_chars"))
+    include_subdomains = _parse_bool_field(options.get("include_subdomains"), True)
+    render_mode = options.get("render_mode")
+    return {
+        "strip_links": strip_links,
+        "strip_images": strip_images,
+        "readability_fallback": readability_fallback,
+        "min_text_chars": min_text_chars,
+        "include_subdomains": include_subdomains,
+        "render_mode": render_mode,
+    }
+
+
+def _validate_urls(urls: List[str]) -> List[str]:
+    if not urls:
+        raise HTTPException(status_code=400, detail="At least one URL is required.")
+    if len(urls) > 200:
+        raise HTTPException(status_code=400, detail="Provide 200 URLs or fewer.")
+    seen = set()
+    unique_urls = []
+    for url in urls:
+        normalized = str(url).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_urls.append(normalized)
+    return unique_urls
+
+
+@app.post("/bulk/combined")
+async def bulk_combined(payload=Body(...)):
+    raw_urls = payload.get("urls") or []
+    urls = _validate_urls(raw_urls)
+    allowed_hosts = _parse_list(payload.get("allowed_hosts"))
+    path_prefixes = _parse_list(payload.get("path_prefixes"))
+    options = _prepare_crawler_options(payload)
+
+    crawler = AsyncCrawler(
+        start_url=urls[0],
+        max_pages=len(urls),
+        include_subdomains=options["include_subdomains"],
+        allowed_hosts=allowed_hosts,
+        path_prefixes=path_prefixes,
+        strip_links=options["strip_links"],
+        strip_images=options["strip_images"],
+        readability_fallback=options["readability_fallback"],
+        min_text_chars=options["min_text_chars"],
+    )
+
+    pages = []
+    async with crawler._create_client() as client:
+        for url in urls:
+            page = await crawler.fetch_and_clean_page(client, url)
+            if page:
+                pages.append(page)
+
+    if not pages:
+        raise HTTPException(
+            status_code=400,
+            detail="No pages could be processed for the provided URLs.",
+        )
+
+    markdown_content = _build_grouped_markdown(pages)
+
+    headers = {
+        "Content-Disposition": 'attachment; filename="bulk_combined.md"',
+        "X-Page-Count": str(len(pages)),
+    }
+    return Response(
+        content=markdown_content,
+        media_type="text/markdown; charset=utf-8",
+        headers=headers,
+    )
+
+
+@app.post("/bulk/zip")
+async def bulk_zip(payload=Body(...)):
+    raw_urls = payload.get("urls") or []
+    urls = _validate_urls(raw_urls)
+    allowed_hosts = _parse_list(payload.get("allowed_hosts"))
+    path_prefixes = _parse_list(payload.get("path_prefixes"))
+    options = _prepare_crawler_options(payload)
+
+    crawler = AsyncCrawler(
+        start_url=urls[0],
+        max_pages=len(urls),
+        include_subdomains=options["include_subdomains"],
+        allowed_hosts=allowed_hosts,
+        path_prefixes=path_prefixes,
+        strip_links=options["strip_links"],
+        strip_images=options["strip_images"],
+        readability_fallback=options["readability_fallback"],
+        min_text_chars=options["min_text_chars"],
+    )
+
+    buffer = io.BytesIO()
+    rendered_pages = []
+
+    async with crawler._create_client() as client:
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for url in urls:
+                page = await crawler.fetch_and_clean_page(client, url)
+                if not page:
+                    continue
+                title_source = page.title or page.path or page.url
+                filename = f"{page.host}__{_slugify(title_source)}.md"
+                rendered_pages.append(
+                    {
+                        "filename": filename,
+                        "title": page.title,
+                        "path": page.path,
+                        "url": page.url,
+                        "host": page.host,
+                    }
+                )
+                zip_file.writestr(filename, page.markdown)
+
+            if rendered_pages:
+                index_markdown = _build_index_markdown(rendered_pages)
+                zip_file.writestr("index.md", index_markdown)
+
+    if not rendered_pages:
+        raise HTTPException(
+            status_code=400,
+            detail="No pages could be processed for the provided URLs.",
+        )
+
+    buffer.seek(0)
+    headers = {
+        "Content-Disposition": 'attachment; filename="bulk_pages.zip"',
+        "X-Page-Count": str(len(rendered_pages)),
+    }
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
