@@ -244,6 +244,34 @@
             color: #4338ca;
             border: 1px solid #c7d2fe;
         }
+        .diagnostics-panel {
+            grid-column: span 2;
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 18px 20px;
+        }
+        .diagnostics-details summary {
+            cursor: pointer;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .diagnostics-list {
+            display: grid;
+            gap: 8px;
+            margin: 8px 0;
+        }
+        .diagnostics-row {
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            font-size: 14px;
+        }
+        .diagnostics-meta {
+            color: #6b7280;
+            font-size: 12px;
+        }
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
@@ -257,6 +285,9 @@
                 align-items: flex-start;
             }
             .selection-panel {
+                grid-column: span 1;
+            }
+            .diagnostics-panel {
                 grid-column: span 1;
             }
             .page-row {
@@ -335,6 +366,27 @@
                 </button>
             </div>
         </div>
+        <div class="diagnostics-panel">
+            <div class="panel-header">
+                <div>
+                    <h3>Diagnostics</h3>
+                    <p class="helper">Inspect the latest crawl status, errors, and content checks.</p>
+                </div>
+                <button type="button" id="diagnostics-btn" class="secondary-btn">Fetch diagnostics</button>
+            </div>
+            <details id="diagnostics-details" class="diagnostics-details">
+                <summary>Last run details</summary>
+                <div id="diagnostics-meta" class="helper"></div>
+                <div>
+                    <h4 style="margin: 12px 0 4px;">Errors</h4>
+                    <div id="diagnostics-errors" class="diagnostics-list"></div>
+                </div>
+                <div>
+                    <h4 style="margin: 12px 0 4px;">HTTP diagnostics</h4>
+                    <div id="diagnostics-items" class="diagnostics-list"></div>
+                </div>
+            </details>
+        </div>
     </div>
 
     <script>
@@ -352,6 +404,11 @@
         const downloadSelectedBtn = document.getElementById('download-selected-btn');
         const downloadSpinner = document.getElementById('download-spinner');
         const downloadText = document.getElementById('download-text');
+        const diagnosticsBtn = document.getElementById('diagnostics-btn');
+        const diagnosticsDetails = document.getElementById('diagnostics-details');
+        const diagnosticsErrors = document.getElementById('diagnostics-errors');
+        const diagnosticsItems = document.getElementById('diagnostics-items');
+        const diagnosticsMeta = document.getElementById('diagnostics-meta');
 
         let previewPages = [];
         let isDownloadingSelected = false;
@@ -485,7 +542,11 @@
                     try {
                         const errorData = await response.json();
                         if (errorData && errorData.detail) {
-                            message = errorData.detail;
+                            if (typeof errorData.detail === 'string') {
+                                message = errorData.detail;
+                            } else if (errorData.detail.message) {
+                                message = errorData.detail.message;
+                            }
                         }
                     } catch (jsonError) {
                         // keep default
@@ -573,6 +634,63 @@
                 .filter((part) => part.length > 0);
         };
 
+        const renderDiagnosticsSection = (data) => {
+            diagnosticsErrors.innerHTML = '';
+            diagnosticsItems.innerHTML = '';
+
+            const pagesCount = data?.pages_count || 0;
+            const thinPages = data?.thin_pages_count || 0;
+            diagnosticsMeta.textContent = `Pages: ${pagesCount} • Thin pages: ${thinPages}`;
+
+            const errors = Array.isArray(data?.errors) ? data.errors : [];
+            if (!errors.length) {
+                const empty = document.createElement('div');
+                empty.className = 'diagnostics-row';
+                empty.textContent = 'No errors recorded.';
+                diagnosticsErrors.appendChild(empty);
+            } else {
+                errors.forEach((err) => {
+                    const row = document.createElement('div');
+                    row.className = 'diagnostics-row';
+                    const title = document.createElement('div');
+                    title.textContent = err.url || 'Unknown URL';
+                    const meta = document.createElement('div');
+                    meta.className = 'diagnostics-meta';
+                    const statusPart = err.status ? ` • status ${err.status}` : '';
+                    meta.textContent = `${err.reason || 'Unknown reason'}${statusPart}`;
+                    row.appendChild(title);
+                    row.appendChild(meta);
+                    diagnosticsErrors.appendChild(row);
+                });
+            }
+
+            const diags = Array.isArray(data?.diagnostics) ? data.diagnostics : [];
+            if (!diags.length) {
+                const empty = document.createElement('div');
+                empty.className = 'diagnostics-row';
+                empty.textContent = 'No diagnostics captured yet.';
+                diagnosticsItems.appendChild(empty);
+            } else {
+                diags.forEach((item) => {
+                    const row = document.createElement('div');
+                    row.className = 'diagnostics-row';
+                    const title = document.createElement('div');
+                    title.textContent = item.final_url || item.url || 'Unknown URL';
+                    const meta = document.createElement('div');
+                    meta.className = 'diagnostics-meta';
+                    const status = item.status || 'n/a';
+                    const reason = item.reason || 'unknown';
+                    const type = item.content_type || 'unknown content-type';
+                    meta.textContent = `Status ${status} • ${reason} • ${type}`;
+                    row.appendChild(title);
+                    row.appendChild(meta);
+                    diagnosticsItems.appendChild(row);
+                });
+            }
+
+            diagnosticsDetails.open = true;
+        };
+
         downloadSelectedBtn.addEventListener('click', async () => {
             showError('');
             const selectedCheckboxes = Array.from(document.querySelectorAll('.page-checkbox:checked'));
@@ -650,6 +768,26 @@
             } finally {
                 setDownloadLoading(false);
                 updateSelectedCount();
+            }
+        });
+
+        diagnosticsBtn.addEventListener('click', async () => {
+            diagnosticsBtn.disabled = true;
+            const originalText = diagnosticsBtn.textContent;
+            diagnosticsBtn.textContent = 'Loading…';
+            try {
+                const response = await fetch('/debug/last-run');
+                if (!response.ok) {
+                    showError('Unable to load diagnostics right now.');
+                    return;
+                }
+                const data = await response.json();
+                renderDiagnosticsSection(data);
+            } catch (error) {
+                showError('An unexpected error occurred while fetching diagnostics.');
+            } finally {
+                diagnosticsBtn.disabled = false;
+                diagnosticsBtn.textContent = originalText;
             }
         });
     </script>
