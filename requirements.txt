@@ -6,3 +6,4 @@ html2text
 jinja2
 python-multipart
 readability-lxml
+playwright

@@ -69,7 +69,7 @@
             color: #111827;
             font-size: 14px;
         }
-        input[type="url"], input[type="number"], input[type="text"] {
+        input[type="url"], input[type="number"], input[type="text"], select {
             width: 100%;
             padding: 12px 14px;
             border: 1px solid #e5e7eb;
@@ -78,18 +78,7 @@
             transition: border-color 0.2s, box-shadow 0.2s;
             background: #f9fafb;
         }
-        textarea {
-            width: 100%;
-            padding: 12px 14px;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            font-size: 15px;
-            transition: border-color 0.2s, box-shadow 0.2s;
-            background: #f9fafb;
-            min-height: 150px;
-            resize: vertical;
-        }
-        input[type="url"]:focus, input[type="number"]:focus, input[type="text"]:focus {
+        input[type="url"]:focus, input[type="number"]:focus, input[type="text"]:focus, select:focus {
             border-color: #4f46e5;
             outline: none;
             box-shadow: 0 8px 20px rgba(79, 70, 229, 0.12);
@@ -418,6 +407,15 @@
                     </div>
                 </div>
             </div>
+            <div>
+                <label for="render-mode-input">Render mode</label>
+                <select id="render-mode-input" name="render_mode">
+                    <option value="http" selected>HTTP only (fastest)</option>
+                    <option value="auto">Auto fallback (HTTP then browser)</option>
+                    <option value="browser">Browser only (JS-heavy pages)</option>
+                </select>
+                <p class="helper">Use browser rendering for SPAs; HTTP keeps crawls fast.</p>
+            </div>
             <div class="actions">
                 <div style="flex:1; max-width: 220px;">
                     <label for="max-pages-input">Max pages</label>
@@ -534,15 +532,7 @@
         const stripImagesInput = document.getElementById('strip-images-input');
         const readabilityInput = document.getElementById('readability-input');
         const minTextCharsInput = document.getElementById('min-text-chars-input');
-        const bulkUrlsInput = document.getElementById('bulk-urls-input');
-        const bulkCombinedBtn = document.getElementById('bulk-combined-btn');
-        const bulkZipBtn = document.getElementById('bulk-zip-btn');
-        const bulkCombinedSpinner = document.getElementById('bulk-combined-spinner');
-        const bulkZipSpinner = document.getElementById('bulk-zip-spinner');
-        const bulkCombinedText = document.getElementById('bulk-combined-text');
-        const bulkZipText = document.getElementById('bulk-zip-text');
-        const bulkAlert = document.getElementById('bulk-alert');
-        const bulkStatus = document.getElementById('bulk-status');
+        const renderModeInput = document.getElementById('render-mode-input');
 
         let previewPages = [];
         let isDownloadingSelected = false;
@@ -717,6 +707,7 @@
             formData.set('strip_images', stripImagesInput.checked ? 'true' : 'false');
             formData.set('readability_fallback', readabilityInput.checked ? 'true' : 'false');
             formData.set('min_text_chars', minTextCharsInput.value || '600');
+            formData.set('render_mode', renderModeInput.value || 'http');
             try {
                 const response = await fetch('/generate', {
                     method: 'POST',
@@ -771,6 +762,7 @@
             formData.set('strip_images', stripImagesInput.checked ? 'true' : 'false');
             formData.set('readability_fallback', readabilityInput.checked ? 'true' : 'false');
             formData.set('min_text_chars', minTextCharsInput.value || '600');
+            formData.set('render_mode', renderModeInput.value || 'http');
             try {
                 const response = await fetch('/crawl-preview', {
                     method: 'POST',
@@ -875,7 +867,8 @@
                     const status = item.status || 'n/a';
                     const reason = item.reason || 'unknown';
                     const type = item.content_type || 'unknown content-type';
-                    meta.textContent = `Status ${status} • ${reason} • ${type}`;
+                    const renderer = item.renderer || 'http';
+                    meta.textContent = `Status ${status} • ${reason} • ${type} • renderer: ${renderer}`;
                     row.appendChild(title);
                     row.appendChild(meta);
                     diagnosticsItems.appendChild(row);
@@ -994,6 +987,7 @@
                 strip_images: stripImagesInput.checked,
                 readability_fallback: readabilityInput.checked,
                 min_text_chars: Number(minTextCharsInput.value || 600),
+                render_mode: renderModeInput.value || 'http',
                 pages: selectedPages,
             };
 
