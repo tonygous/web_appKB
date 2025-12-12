@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlparse
 
-from fastapi import Body, FastAPI, Form, HTTPException, Request
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from crawler import AsyncCrawler
+from connectors.importer import ImportConnector
 
 app = FastAPI(title="Web-to-KnowledgeBase")
 templates = Jinja2Templates(directory="templates")
@@ -38,6 +39,42 @@ async def debug_last_run():
         "pages_count": last_run_info.get("pages_count", 0),
         "thin_pages_count": last_run_info.get("thin_pages_count", 0),
     }
+
+
+@app.post("/import")
+async def import_documents(
+    *,
+    mode: str = Query("combined", pattern="^(combined|zip)$"),
+    files: List[UploadFile] = File(...),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
+
+    connector = ImportConnector()
+    documents = await connector.parse_uploads(files)
+
+    if not documents:
+        raise HTTPException(
+            status_code=400, detail="Uploaded files could not be parsed into documents."
+        )
+
+    if mode == "combined":
+        combined = connector.export_combined(documents)
+        if not combined.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded files did not contain readable content.",
+            )
+        headers = {"Content-Disposition": 'attachment; filename="combined.md"'}
+        return Response(
+            content=combined,
+            media_type="text/markdown; charset=utf-8",
+            headers=headers,
+        )
+
+    archive = connector.export_zip(documents)
+    headers = {"Content-Disposition": 'attachment; filename="documents.zip"'}
+    return StreamingResponse(archive, media_type="application/zip", headers=headers)
 
 
 def _parse_list_field(raw_value: Optional[str]) -> List[str]:

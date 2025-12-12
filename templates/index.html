@@ -69,7 +69,7 @@
             color: #111827;
             font-size: 14px;
         }
-        input[type="url"], input[type="number"], input[type="text"] {
+        input[type="url"], input[type="number"], input[type="text"], select, textarea {
             width: 100%;
             padding: 12px 14px;
             border: 1px solid #e5e7eb;
@@ -78,7 +78,7 @@
             transition: border-color 0.2s, box-shadow 0.2s;
             background: #f9fafb;
         }
-        input[type="url"]:focus, input[type="number"]:focus, input[type="text"]:focus {
+        input[type="url"]:focus, input[type="number"]:focus, input[type="text"]:focus, select:focus, textarea:focus {
             border-color: #4f46e5;
             outline: none;
             box-shadow: 0 8px 20px rgba(79, 70, 229, 0.12);
@@ -326,45 +326,73 @@
         <div class="card-header">
             <div>
                 <h1>Web-to-KnowledgeBase</h1>
-                <p class="helper">Crawl any site and generate a markdown knowledge base.</p>
+                <p class="helper">Crawl a site or import existing exports to generate a markdown knowledge base.</p>
             </div>
             <div class="badge">Async FastAPI</div>
         </div>
         <form id="crawl-form">
             <div>
-                <label for="url-input">Website URL</label>
-                <input type="url" id="url-input" name="url" placeholder="Enter website URL (e.g. https://docs.mexem.com)" required>
+                <label for="source-type">Source type</label>
+                <select id="source-type" name="source_type">
+                    <option value="crawl" selected>Website crawl</option>
+                    <option value="bulk">Bulk URLs</option>
+                    <option value="import">Import file</option>
+                </select>
+                <p class="helper">Choose how to build your knowledge base.</p>
             </div>
-            <div>
-                <label for="allowed-hosts-input">Allowed domains / subdomains</label>
-                <input type="text" id="allowed-hosts-input" name="allowed_hosts" placeholder="e.g. mexem.com, support.mexem.com">
-                <p class="helper">Comma or space separated. Leave blank to include the root domain and subdomains.</p>
-            </div>
-            <div>
-                <label for="path-prefixes-input">Path prefixes (optional)</label>
-                <input type="text" id="path-prefixes-input" name="path_prefixes" placeholder="e.g. /, /help, /docs">
-                <p class="helper">Only crawl URLs that start with these prefixes.</p>
-            </div>
-            <div>
-                <label>Content extraction</label>
-                <div class="options-grid">
-                    <label class="checkbox-row">
-                        <input type="checkbox" id="strip-links-input" name="strip_links" checked>
-                        Strip links (remove URLs, keep anchor text)
-                    </label>
-                    <label class="checkbox-row">
-                        <input type="checkbox" id="strip-images-input" name="strip_images" checked>
-                        Strip images
-                    </label>
-                    <label class="checkbox-row">
-                        <input type="checkbox" id="readability-input" name="readability_fallback" checked>
-                        Aggressive main extraction (readability)
-                    </label>
-                    <div>
-                        <label for="min-text-chars-input">Min text chars before fallback</label>
-                        <input type="number" id="min-text-chars-input" name="min_text_chars" min="200" max="5000" value="600">
-                        <p class="helper">If extracted text is shorter, readability is used.</p>
+            <div id="crawl-fields">
+                <div>
+                    <label for="url-input">Website URL</label>
+                    <input type="url" id="url-input" name="url" placeholder="Enter website URL (e.g. https://docs.mexem.com)" required>
+                </div>
+                <div>
+                    <label for="allowed-hosts-input">Allowed domains / subdomains</label>
+                    <input type="text" id="allowed-hosts-input" name="allowed_hosts" placeholder="e.g. mexem.com, support.mexem.com">
+                    <p class="helper">Comma or space separated. Leave blank to include the root domain and subdomains.</p>
+                </div>
+                <div>
+                    <label for="path-prefixes-input">Path prefixes (optional)</label>
+                    <input type="text" id="path-prefixes-input" name="path_prefixes" placeholder="e.g. /, /help, /docs">
+                    <p class="helper">Only crawl URLs that start with these prefixes.</p>
+                </div>
+                <div>
+                    <label>Content extraction</label>
+                    <div class="options-grid">
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="strip-links-input" name="strip_links" checked>
+                            Strip links (remove URLs, keep anchor text)
+                        </label>
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="strip-images-input" name="strip_images" checked>
+                            Strip images
+                        </label>
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="readability-input" name="readability_fallback" checked>
+                            Aggressive main extraction (readability)
+                        </label>
+                        <div>
+                            <label for="min-text-chars-input">Min text chars before fallback</label>
+                            <input type="number" id="min-text-chars-input" name="min_text_chars" min="200" max="5000" value="600">
+                            <p class="helper">If extracted text is shorter, readability is used.</p>
+                        </div>
                     </div>
+                </div>
+            </div>
+            <div id="bulk-fields" style="display:none;">
+                <label for="bulk-urls-input">Bulk URLs</label>
+                <textarea id="bulk-urls-input" name="bulk_urls" rows="4" placeholder="Paste URLs, one per line" disabled></textarea>
+                <p class="helper">Bulk URL import is coming soon (Task 4).</p>
+            </div>
+            <div id="import-fields" style="display:none;">
+                <label for="import-file-input">Upload exported files</label>
+                <input type="file" id="import-file-input" name="files" multiple accept=".txt,.md,.html,.htm,.eml,.mbox">
+                <p class="helper">Upload .txt, .md, .html, .eml, or .mbox files to convert them to markdown.</p>
+                <div style="max-width: 220px;">
+                    <label for="import-mode">Output format</label>
+                    <select id="import-mode" name="mode">
+                        <option value="combined" selected>Combined markdown</option>
+                        <option value="zip">ZIP with index</option>
+                    </select>
                 </div>
             </div>
             <div class="actions">
@@ -455,21 +483,36 @@
         const stripImagesInput = document.getElementById('strip-images-input');
         const readabilityInput = document.getElementById('readability-input');
         const minTextCharsInput = document.getElementById('min-text-chars-input');
+        const sourceTypeSelect = document.getElementById('source-type');
+        const crawlFields = document.getElementById('crawl-fields');
+        const bulkFields = document.getElementById('bulk-fields');
+        const importFields = document.getElementById('import-fields');
+        const importFileInput = document.getElementById('import-file-input');
+        const importModeSelect = document.getElementById('import-mode');
+        const selectionPanel = document.querySelector('.selection-panel');
+        const diagnosticsPanel = document.querySelector('.diagnostics-panel');
+        const urlInput = document.getElementById('url-input');
+        const allowedHostsInput = document.getElementById('allowed-hosts-input');
+        const pathPrefixesInput = document.getElementById('path-prefixes-input');
+        const maxPagesInput = document.getElementById('max-pages-input');
 
         let previewPages = [];
         let isDownloadingSelected = false;
+
+        const getSubmitIdleText = () => sourceTypeSelect.value === 'import' ? 'Process upload' : 'Download combined .md';
+        const getSubmitLoadingText = () => sourceTypeSelect.value === 'import' ? 'Processing upload…' : 'Crawling website…';
 
         const setLoading = (isLoading) => {
             if (isLoading) {
                 form.classList.add('loading');
                 spinner.style.display = 'inline-block';
                 generateBtn.disabled = true;
-                buttonText.textContent = 'Crawling website…';
+                buttonText.textContent = getSubmitLoadingText();
             } else {
                 form.classList.remove('loading');
                 spinner.style.display = 'none';
                 generateBtn.disabled = false;
-                buttonText.textContent = 'Download combined .md';
+                buttonText.textContent = getSubmitIdleText();
             }
         };
 
@@ -499,9 +542,55 @@
             updateSelectedCount();
         };
 
+        const updateSourceVisibility = () => {
+            const source = sourceTypeSelect.value;
+            const isCrawl = source === 'crawl';
+            const isImport = source === 'import';
+
+            crawlFields.style.display = isCrawl ? 'grid' : 'none';
+            bulkFields.style.display = source === 'bulk' ? 'block' : 'none';
+            importFields.style.display = isImport ? 'block' : 'none';
+            selectionPanel.style.display = isCrawl ? 'block' : 'none';
+            diagnosticsPanel.style.display = isCrawl ? 'block' : 'none';
+            scanBtn.style.display = isCrawl ? 'inline-flex' : 'none';
+            previewEmpty.style.display = isCrawl && previewPages.length === 0 ? 'block' : 'none';
+            if (!isCrawl) {
+                previewPages = [];
+                previewResults.innerHTML = '';
+                selectedCount.textContent = 'Selected: 0 pages';
+            }
+
+            urlInput.required = isCrawl;
+            urlInput.disabled = !isCrawl;
+            allowedHostsInput.disabled = !isCrawl;
+            pathPrefixesInput.disabled = !isCrawl;
+            stripLinksInput.disabled = !isCrawl;
+            stripImagesInput.disabled = !isCrawl;
+            readabilityInput.disabled = !isCrawl;
+            minTextCharsInput.disabled = !isCrawl;
+            maxPagesInput.disabled = !isCrawl;
+
+            importFileInput.disabled = !isImport;
+            importModeSelect.disabled = !isImport;
+
+            generateBtn.disabled = false;
+            buttonText.textContent = getSubmitIdleText();
+        };
+
         const showError = (message) => {
             alertBox.textContent = message;
             alertBox.style.display = message ? 'block' : 'none';
+        };
+
+        const triggerDownload = (blob, filename) => {
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
         };
 
         const updateSelectedCount = () => {
@@ -571,9 +660,74 @@
             updateSelectedCount();
         };
 
+        sourceTypeSelect.addEventListener('change', () => {
+            showError('');
+            updateSourceVisibility();
+        });
+
+        updateSourceVisibility();
+
+        const handleImportSubmit = async () => {
+            const files = importFileInput.files;
+            if (!files || !files.length) {
+                showError('Please select at least one file to import.');
+                return;
+            }
+
+            const mode = importModeSelect.value || 'combined';
+            const formData = new FormData();
+            Array.from(files).forEach((file) => formData.append('files', file));
+
+            setLoading(true);
+            try {
+                const response = await fetch(`/import?mode=${encodeURIComponent(mode)}`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    let message = 'Failed to process upload. Please try again.';
+                    try {
+                        const errorData = await response.json();
+                        if (errorData && errorData.detail) {
+                            message = typeof errorData.detail === 'string' ? errorData.detail : (errorData.detail.message || message);
+                        }
+                    } catch (jsonError) {
+                        // default message
+                    }
+                    showError(message);
+                    return;
+                }
+
+                const blob = await response.blob();
+                const disposition = response.headers.get('content-disposition') || '';
+                const match = disposition.match(/filename="?([^";]+)"?/i);
+                let filename = mode === 'zip' ? 'documents.zip' : 'combined.md';
+                if (match && match[1]) {
+                    filename = match[1];
+                }
+                triggerDownload(blob, filename);
+            } catch (error) {
+                showError('An unexpected error occurred while processing the upload.');
+            } finally {
+                setLoading(false);
+            }
+        };
+
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
             showError('');
+            const source = sourceTypeSelect.value;
+            if (source === 'bulk') {
+                showError('Bulk URL mode is coming soon. Please use crawl or import.');
+                return;
+            }
+
+            if (source === 'import') {
+                await handleImportSubmit();
+                return;
+            }
+
             setLoading(true);
 
             const formData = new FormData(form);
@@ -606,14 +760,7 @@
                 }
 
                 const blob = await response.blob();
-                const url = window.URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = 'knowledgebase.md';
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-                window.URL.revokeObjectURL(url);
+                triggerDownload(blob, 'knowledgebase.md');
             } catch (error) {
                 showError('An unexpected error occurred. Please try again.');
             } finally {
@@ -624,6 +771,10 @@
         scanBtn.addEventListener('click', async (event) => {
             event.preventDefault();
             showError('');
+            if (sourceTypeSelect.value !== 'crawl') {
+                showError('Scanning is only available in website crawl mode.');
+                return;
+            }
             setScanLoading(true);
 
             const formData = new FormData(form);
