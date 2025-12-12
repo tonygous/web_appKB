@@ -41,7 +41,9 @@ class PageRecord:
     path: str
     title: str
     markdown: str
+    clean_text_chars: int = 0
     used_readability: bool = False
+    renderer: str = "http"
 
 
 class AsyncCrawler:
@@ -65,6 +67,7 @@ class AsyncCrawler:
         readability_fallback: bool = True,
         remove_additional_noise: bool = True,
         main_selectors: Optional[Sequence[str]] = None,
+        render_mode: str = "http",
     ) -> None:
         self.start_url = self._normalize_url(start_url)
         self.max_pages = max(1, min(max_pages, 500))
@@ -88,6 +91,9 @@ class AsyncCrawler:
         self.min_text_chars = max(0, min_text_chars)
         self.readability_fallback = readability_fallback
         self.remove_additional_noise = remove_additional_noise
+        self.render_mode = render_mode.lower()
+        if self.render_mode not in {"http", "auto", "browser"}:
+            self.render_mode = "http"
         self.main_selectors = list(main_selectors) if main_selectors else [
             "main",
             "article",
@@ -208,6 +214,8 @@ class AsyncCrawler:
         content_bytes: int,
         elapsed_ms: int,
         reason: str,
+        renderer: str = "http",
+        error: str = "",
     ) -> None:
         self.diagnostics.append(
             {
@@ -218,6 +226,8 @@ class AsyncCrawler:
                 "bytes": content_bytes,
                 "elapsed_ms": elapsed_ms,
                 "reason": reason,
+                "renderer": renderer,
+                "error": error,
             }
         )
 
@@ -385,7 +395,9 @@ class AsyncCrawler:
             timeout=self.request_timeout,
         )
 
-    async def _fetch_content(self, client: httpx.AsyncClient, url: str) -> Optional[str]:
+    async def _fetch_http_content(
+        self, client: httpx.AsyncClient, url: str
+    ) -> Tuple[Optional[str], str]:
         max_retries = 2
         attempt = 0
         while attempt <= max_retries:
@@ -414,8 +426,9 @@ class AsyncCrawler:
                         content_bytes=content_length,
                         elapsed_ms=elapsed_ms,
                         reason=reason,
+                        renderer="http",
                     )
-                    return None
+                    return None, final_url
 
                 if not self._is_html_content(content_type):
                     self._record_error(url, "non-html", str(status_code))
@@ -427,8 +440,9 @@ class AsyncCrawler:
                         content_bytes=content_length,
                         elapsed_ms=elapsed_ms,
                         reason="non-html",
+                        renderer="http",
                     )
-                    return None
+                    return None, final_url
 
                 self._record_diagnostic(
                     original_url=url,
@@ -438,8 +452,9 @@ class AsyncCrawler:
                     content_bytes=content_length,
                     elapsed_ms=elapsed_ms,
                     reason="ok",
+                    renderer="http",
                 )
-                return response.text
+                return response.text, final_url
             except httpx.TimeoutException:
                 elapsed_ms = int((time.monotonic() - start_time) * 1000)
                 if attempt < max_retries:
@@ -455,8 +470,9 @@ class AsyncCrawler:
                     content_bytes=0,
                     elapsed_ms=elapsed_ms,
                     reason="timeout",
+                    renderer="http",
                 )
-                return None
+                return None, url
             except httpx.HTTPError as exc:  # pragma: no cover - safety net
                 elapsed_ms = int((time.monotonic() - start_time) * 1000)
                 status_code = str(getattr(exc.response, "status_code", ""))
@@ -473,8 +489,81 @@ class AsyncCrawler:
                     content_bytes=0,
                     elapsed_ms=elapsed_ms,
                     reason="http-error",
+                    renderer="http",
+                    error=str(exc),
                 )
-                return None
+                return None, url
+
+    async def _fetch_browser_content(self, url: str) -> Tuple[Optional[str], str]:
+        start_time = time.monotonic()
+        final_url = url
+        try:
+            from playwright.async_api import async_playwright
+        except Exception as exc:  # pragma: no cover - optional dependency
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+            self._record_diagnostic(
+                original_url=url,
+                final_url=final_url,
+                status="",
+                content_type="",
+                content_bytes=0,
+                elapsed_ms=elapsed_ms,
+                reason="playwright-missing",
+                renderer="browser",
+                error=str(exc),
+            )
+            self._record_error(url, "browser-render-failed")
+            return None, final_url
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                response = await page.goto(
+                    url, wait_until="networkidle", timeout=45000
+                )
+                try:
+                    await page.wait_for_selector(
+                        "main, article, [role='main']", timeout=5000
+                    )
+                except Exception:
+                    pass
+                html = await page.content()
+                final_url = page.url
+                status_code = str(response.status) if response else ""
+                content_type = (
+                    response.headers.get("content-type", "") if response else ""
+                )
+                content_length = len(html.encode("utf-8")) if html else 0
+                elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                await browser.close()
+
+                self._record_diagnostic(
+                    original_url=url,
+                    final_url=final_url,
+                    status=status_code,
+                    content_type=content_type,
+                    content_bytes=content_length,
+                    elapsed_ms=elapsed_ms,
+                    reason="ok",
+                    renderer="browser",
+                )
+                return html, final_url
+        except Exception as exc:  # pragma: no cover - safety net
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+            self._record_error(url, "browser-render-failed")
+            self._record_diagnostic(
+                original_url=url,
+                final_url=final_url,
+                status="",
+                content_type="",
+                content_bytes=0,
+                elapsed_ms=elapsed_ms,
+                reason="browser-error",
+                renderer="browser",
+                error=str(exc),
+            )
+            return None, final_url
 
     def _remove_noise_tags(self, soup: BeautifulSoup) -> None:
         removable_tags = ["script", "style", "nav", "footer", "header", "aside"]
@@ -555,6 +644,80 @@ class AsyncCrawler:
         markdown_content = markdown_converter.handle(str(content_area))
         cleaned_markdown = self._postprocess_markdown(markdown_content)
         return title, cleaned_markdown, used_readability
+
+    async def _render_page(
+        self, client: httpx.AsyncClient, url: str
+    ) -> Optional[Tuple[str, str, str, bool, str, str]]:
+        def _clean_and_measure(html: str, source_url: str) -> Tuple[str, str, bool, int]:
+            title, markdown, used_readability = self._clean_html(html, source_url)
+            return title, markdown, used_readability, len(markdown.strip())
+
+        renderer_used = "http"
+        final_url = url
+        title = ""
+        markdown = ""
+        used_readability = False
+        content_html: Optional[str] = None
+        char_count = 0
+
+        http_content: Optional[str] = None
+        http_final_url: str = url
+
+        if self.render_mode in {"http", "auto"}:
+            http_content, http_final_url = await self._fetch_http_content(client, url)
+            if http_content:
+                title, markdown, used_readability, char_count = _clean_and_measure(
+                    http_content, http_final_url
+                )
+                final_url = http_final_url
+
+        if self.render_mode == "browser":
+            browser_content, browser_final_url = await self._fetch_browser_content(url)
+            if browser_content:
+                content_html = browser_content
+                final_url = browser_final_url
+                title, markdown, used_readability, char_count = _clean_and_measure(
+                    browser_content, browser_final_url
+                )
+                renderer_used = "browser"
+            elif http_content:
+                content_html = http_content
+            else:
+                return None
+        elif self.render_mode == "auto":
+            if http_content and char_count >= self.min_text_chars:
+                content_html = http_content
+            else:
+                browser_content, browser_final_url = await self._fetch_browser_content(
+                    url
+                )
+                if browser_content:
+                    content_html = browser_content
+                    final_url = browser_final_url
+                    title, markdown, used_readability, char_count = _clean_and_measure(
+                        browser_content, browser_final_url
+                    )
+                    renderer_used = "browser"
+                elif http_content:
+                    content_html = http_content
+                else:
+                    return None
+        else:
+            if not http_content:
+                return None
+            content_html = http_content
+
+        if content_html is None:
+            return None
+
+        return (
+            content_html,
+            title,
+            markdown,
+            used_readability,
+            renderer_used,
+            final_url,
+        )
 
     def _extract_links(self, url: str, soup: BeautifulSoup) -> List[str]:
         links: List[str] = []
@@ -692,29 +855,64 @@ class AsyncCrawler:
     async def _process_url(
         self, client: httpx.AsyncClient, url: str
     ) -> Optional[Tuple[PageRecord, List[str]]]:
-        content = await self._fetch_content(client, url)
-        if not content:
+        rendered = await self._render_page(client, url)
+        if not rendered:
             return None
 
-        soup = BeautifulSoup(content, "html.parser")
-        canonical_url = self._extract_canonical(soup, url)
-        page_url = canonical_url or url
-        links = self._extract_links(url, soup)
-        title, markdown, used_readability = self._clean_html(content, page_url)
-        parsed_url = urlparse(page_url)
+        content_html, title, markdown, used_readability, renderer_used, final_url = rendered
+
+        soup = BeautifulSoup(content_html, "html.parser")
+        links = self._extract_links(final_url, soup)
+        parsed_url = urlparse(final_url or url)
         host = parsed_url.hostname or self.root_domain or ""
         path = parsed_url.path or "/"
         if parsed_url.query:
             path = f"{path}?{parsed_url.query}"
         page_record = PageRecord(
-            url=page_url,
+            url=final_url,
             host=host,
             path=path or "/",
             title=title or "",
             markdown=markdown,
+            clean_text_chars=len(markdown.strip()),
             used_readability=used_readability,
+            renderer=renderer_used,
         )
         return page_record, links
+
+    async def fetch_and_clean_page(
+        self, client: httpx.AsyncClient, url: str
+    ) -> Optional[PageRecord]:
+        normalized_url = self._normalize_url(url)
+        if not normalized_url:
+            return None
+        if self._has_ignored_extension(normalized_url):
+            return None
+        if not self._is_allowed_url(normalized_url):
+            return None
+
+        content = await self._fetch_content(client, normalized_url)
+        if not content:
+            return None
+
+        title, markdown, used_readability = self._clean_html(
+            content, normalized_url
+        )
+        parsed_url = urlparse(normalized_url)
+        host = parsed_url.hostname or self.root_domain or ""
+        path = parsed_url.path or "/"
+        if parsed_url.query:
+            path = f"{path}?{parsed_url.query}"
+
+        return PageRecord(
+            url=normalized_url,
+            host=host,
+            path=path or "/",
+            title=title or "",
+            markdown=markdown,
+            clean_text_chars=len(markdown.strip()),
+            used_readability=used_readability,
+        )
 
     async def crawl_with_pages(self) -> List[PageRecord]:
         pages: List[PageRecord] = []
