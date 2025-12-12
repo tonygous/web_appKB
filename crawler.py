@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import re
 import time
 from collections import deque
@@ -67,6 +68,10 @@ class AsyncCrawler:
         self.allowed_hosts = self._normalize_hosts(allowed_hosts)
         self.path_prefixes = self._normalize_prefixes(path_prefixes)
 
+        self.request_timeout = httpx.Timeout(
+            timeout, connect=timeout, read=timeout, write=timeout, pool=timeout
+        )
+
         parsed_start = urlparse(self.start_url)
         self.root_domain = self._extract_root_domain(parsed_start.hostname)
 
@@ -75,8 +80,11 @@ class AsyncCrawler:
         self.queue: Deque[Tuple[str, int]] = deque([(self.start_url, 0)])
 
         self.errors: List[Dict[str, str]] = []
+        self.diagnostics: List[Dict[str, object]] = []
         self.timed_out: bool = False
         self.logger = logging.getLogger(__name__)
+
+        self._retry_statuses = {408, 425, 429, 500, 502, 503, 504}
 
     def _normalize_hosts(self, hosts: Optional[Sequence[str]]) -> List[str]:
         if not hosts:
@@ -128,6 +136,29 @@ class AsyncCrawler:
         self.errors.append({"url": url, "reason": reason, "status": status})
         self.logger.warning("Error fetching %s: %s %s", url, reason, status)
 
+    def _record_diagnostic(
+        self,
+        *,
+        original_url: str,
+        final_url: str,
+        status: str,
+        content_type: str,
+        content_bytes: int,
+        elapsed_ms: int,
+        reason: str,
+    ) -> None:
+        self.diagnostics.append(
+            {
+                "url": original_url,
+                "final_url": final_url,
+                "status": status,
+                "content_type": content_type,
+                "bytes": content_bytes,
+                "elapsed_ms": elapsed_ms,
+                "reason": reason,
+            }
+        )
+
     def _is_internal_link(self, url: str) -> bool:
         parsed = urlparse(url)
         if parsed.scheme not in {"", "http", "https"}:
@@ -173,18 +204,122 @@ class AsyncCrawler:
         path = urlparse(url).path.lower()
         return any(path.endswith(ext) for ext in IGNORED_EXTENSIONS)
 
+    def _backoff_delay(self, attempt: int) -> float:
+        base = 0.5 * (2 ** attempt)
+        jitter = random.uniform(-0.05, 0.05)
+        return max(0.0, base + jitter)
+
+    def _is_html_content(self, content_type: str) -> bool:
+        lowered = content_type.lower()
+        return "text/html" in lowered or "application/xhtml+xml" in lowered
+
+    def _create_client(self) -> httpx.AsyncClient:
+        default_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/123.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+        }
+        return httpx.AsyncClient(
+            headers=default_headers,
+            follow_redirects=True,
+            timeout=self.request_timeout,
+        )
+
     async def _fetch_content(self, client: httpx.AsyncClient, url: str) -> Optional[str]:
-        try:
-            response = await client.get(url, timeout=self.timeout, follow_redirects=True)
-            content_type = response.headers.get("content-type", "")
-            if response.status_code == httpx.codes.OK and "text/html" in content_type:
+        max_retries = 2
+        attempt = 0
+        while attempt <= max_retries:
+            start_time = time.monotonic()
+            try:
+                response = await client.get(url)
+                elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                status_code = response.status_code
+                content_type = response.headers.get("content-type", "")
+                content_length = len(response.content or b"")
+                final_url = str(response.url)
+
+                if status_code in self._retry_statuses and attempt < max_retries:
+                    await asyncio.sleep(self._backoff_delay(attempt))
+                    attempt += 1
+                    continue
+
+                if status_code >= 400:
+                    reason = "blocked" if status_code in {401, 403, 429} else "http-error"
+                    self._record_error(url, reason, str(status_code))
+                    self._record_diagnostic(
+                        original_url=url,
+                        final_url=final_url,
+                        status=str(status_code),
+                        content_type=content_type,
+                        content_bytes=content_length,
+                        elapsed_ms=elapsed_ms,
+                        reason=reason,
+                    )
+                    return None
+
+                if not self._is_html_content(content_type):
+                    self._record_error(url, "non-html", str(status_code))
+                    self._record_diagnostic(
+                        original_url=url,
+                        final_url=final_url,
+                        status=str(status_code),
+                        content_type=content_type,
+                        content_bytes=content_length,
+                        elapsed_ms=elapsed_ms,
+                        reason="non-html",
+                    )
+                    return None
+
+                self._record_diagnostic(
+                    original_url=url,
+                    final_url=final_url,
+                    status=str(status_code),
+                    content_type=content_type,
+                    content_bytes=content_length,
+                    elapsed_ms=elapsed_ms,
+                    reason="ok",
+                )
                 return response.text
-            self._record_error(url, "non-200 or non-html", str(response.status_code))
-        except httpx.TimeoutException:
-            self._record_error(url, "timeout")
-        except httpx.HTTPError as exc:  # pragma: no cover - safety net
-            self._record_error(url, "http_error", str(getattr(exc.response, "status_code", "")))
-        return None
+            except httpx.TimeoutException:
+                elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                if attempt < max_retries:
+                    await asyncio.sleep(self._backoff_delay(attempt))
+                    attempt += 1
+                    continue
+                self._record_error(url, "timeout")
+                self._record_diagnostic(
+                    original_url=url,
+                    final_url=url,
+                    status="",
+                    content_type="",
+                    content_bytes=0,
+                    elapsed_ms=elapsed_ms,
+                    reason="timeout",
+                )
+                return None
+            except httpx.HTTPError as exc:  # pragma: no cover - safety net
+                elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                status_code = str(getattr(exc.response, "status_code", ""))
+                if attempt < max_retries:
+                    await asyncio.sleep(self._backoff_delay(attempt))
+                    attempt += 1
+                    continue
+                self._record_error(url, "http-error", status_code)
+                self._record_diagnostic(
+                    original_url=url,
+                    final_url=url,
+                    status=status_code,
+                    content_type="",
+                    content_bytes=0,
+                    elapsed_ms=elapsed_ms,
+                    reason="http-error",
+                )
+                return None
 
     def _clean_html(self, html: str, url: str) -> Tuple[str, str]:
         soup = BeautifulSoup(html, "html.parser")
@@ -272,9 +407,7 @@ class AsyncCrawler:
         semaphore = asyncio.Semaphore(self.max_concurrent_requests)
         start_time = time.monotonic()
 
-        async with httpx.AsyncClient(
-            headers={"User-Agent": "Web-to-KnowledgeBase/1.0 (+https://example.com)"}
-        ) as client:
+        async with self._create_client() as client:
             while self.queue and len(pages) < self.max_pages:
                 if time.monotonic() - start_time > self.crawl_timeout:
                     self.timed_out = True

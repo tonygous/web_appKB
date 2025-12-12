@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urlparse
 
-import httpx
 from fastapi import Body, FastAPI, Form, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -17,9 +16,28 @@ app = FastAPI(title="Web-to-KnowledgeBase")
 templates = Jinja2Templates(directory="templates")
 
 
+last_run_info = {
+    "errors": [],
+    "diagnostics": [],
+    "pages_count": 0,
+    "thin_pages_count": 0,
+    "total_chars": 0,
+}
+
+
 @app.get("/")
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/debug/last-run")
+async def debug_last_run():
+    return {
+        "errors": last_run_info.get("errors", []),
+        "diagnostics": last_run_info.get("diagnostics", []),
+        "pages_count": last_run_info.get("pages_count", 0),
+        "thin_pages_count": last_run_info.get("thin_pages_count", 0),
+    }
 
 
 def _parse_list_field(raw_value: Optional[str]) -> List[str]:
@@ -34,6 +52,19 @@ def _slugify(value: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", value)
     value = re.sub(r"-+", "-", value).strip("-")
     return value or "page"
+
+
+def _update_last_run(crawler: AsyncCrawler, pages: List, total_chars: int) -> None:
+    thin_pages = sum(1 for page in pages if len(page.markdown.strip()) < 200)
+    last_run_info.update(
+        {
+            "errors": list(crawler.errors),
+            "diagnostics": list(crawler.diagnostics),
+            "pages_count": len(pages),
+            "thin_pages_count": thin_pages,
+            "total_chars": total_chars,
+        }
+    )
 
 
 def _clamp_max_pages(raw_value: Optional[int]) -> int:
@@ -63,11 +94,20 @@ async def generate_knowledgebase(
         path_prefixes=prefixes,
     )
 
-    markdown_content = await crawler.crawl()
-    if not markdown_content:
+    pages = await crawler.crawl_with_pages()
+    total_chars = sum(len(page.markdown) for page in pages)
+    markdown_content = crawler._combine_pages(pages)
+
+    _update_last_run(crawler, pages, total_chars)
+
+    if len(pages) == 0 or total_chars < 500:
         raise HTTPException(
             status_code=400,
-            detail="No content could be extracted from the provided URL.",
+            detail={
+                "message": "Crawl produced too little content. Please review diagnostics.",
+                "diagnostics": crawler.diagnostics[:10],
+                "errors": crawler.errors[:10],
+            },
         )
 
     parsed = urlparse(url)
@@ -110,6 +150,9 @@ async def crawl_preview(
     )
 
     pages = await crawler.crawl_with_pages()
+    total_chars = sum(len(page.markdown) for page in pages)
+    _update_last_run(crawler, pages, total_chars)
+
     if not pages:
         raise HTTPException(
             status_code=400,
@@ -158,7 +201,7 @@ async def download_selected(payload=Body(...)):
     buffer = io.BytesIO()
     added_files = 0
 
-    async with httpx.AsyncClient() as client:
+    async with crawler._create_client() as client:
         with zipfile.ZipFile(
             buffer, mode="w", compression=zipfile.ZIP_DEFLATED
         ) as zip_file:
