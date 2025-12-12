@@ -11,6 +11,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 from bs4 import BeautifulSoup
 import html2text
+from readability import Document
 
 
 IGNORED_EXTENSIONS = {
@@ -40,6 +41,7 @@ class PageRecord:
     path: str
     title: str
     markdown: str
+    used_readability: bool = False
 
 
 class AsyncCrawler:
@@ -55,6 +57,13 @@ class AsyncCrawler:
         max_depth: int = 4,
         max_concurrent_requests: int = 5,
         respect_robots: bool = False,
+        *,
+        strip_links: bool = True,
+        strip_images: bool = True,
+        min_text_chars: int = 600,
+        readability_fallback: bool = True,
+        remove_additional_noise: bool = True,
+        main_selectors: Optional[Sequence[str]] = None,
     ) -> None:
         self.start_url = self._normalize_url(start_url)
         self.max_pages = max(1, min(max_pages, 500))
@@ -72,6 +81,24 @@ class AsyncCrawler:
             timeout, connect=timeout, read=timeout, write=timeout, pool=timeout
         )
 
+        self.strip_links = strip_links
+        self.strip_images = strip_images
+        self.min_text_chars = max(0, min_text_chars)
+        self.readability_fallback = readability_fallback
+        self.remove_additional_noise = remove_additional_noise
+        self.main_selectors = list(main_selectors) if main_selectors else [
+            "main",
+            "article",
+            '[role="main"]',
+            "#content",
+            ".content",
+            ".main",
+            ".main-content",
+            ".article",
+            ".post",
+            ".entry-content",
+        ]
+
         parsed_start = urlparse(self.start_url)
         self.root_domain = self._extract_root_domain(parsed_start.hostname)
 
@@ -82,6 +109,7 @@ class AsyncCrawler:
         self.errors: List[Dict[str, str]] = []
         self.diagnostics: List[Dict[str, object]] = []
         self.timed_out: bool = False
+        self.line_frequencies: Dict[str, int] = {}
         self.logger = logging.getLogger(__name__)
 
         self._retry_statuses = {408, 425, 429, 500, 502, 503, 504}
@@ -321,29 +349,33 @@ class AsyncCrawler:
                 )
                 return None
 
-    def _clean_html(self, html: str, url: str) -> Tuple[str, str]:
-        soup = BeautifulSoup(html, "html.parser")
-        for tag_name in ["script", "style", "nav", "footer", "header", "aside"]:
+    def _remove_noise_tags(self, soup: BeautifulSoup) -> None:
+        removable_tags = ["script", "style", "nav", "footer", "header", "aside"]
+        if self.remove_additional_noise:
+            removable_tags.extend(["form", "noscript", "svg", "iframe"])
+        for tag_name in removable_tags:
             for tag in soup.find_all(tag_name):
                 tag.decompose()
 
-        for tag in soup.find_all("img"):
-            tag.decompose()
+    def _select_main_area(self, soup: BeautifulSoup) -> BeautifulSoup:
+        for selector in self.main_selectors:
+            found = soup.select_one(selector)
+            if found:
+                return found
+        if soup.body:
+            return soup.body
+        return soup
 
-        content_area = soup.find("main") or soup.find("article") or soup.body or soup
-        title_text = ""
-        if soup.title and soup.title.string:
-            title_text = soup.title.string.strip()
-        title = title_text or url
+    def _create_markdown_converter(self) -> html2text.HTML2Text:
+        converter = html2text.HTML2Text()
+        converter.body_width = 0
+        converter.ignore_links = self.strip_links
+        converter.ignore_images = self.strip_images
+        converter.inline_links = False
+        converter.wrap_links = False
+        return converter
 
-        markdown_converter = html2text.HTML2Text()
-        markdown_converter.body_width = 0
-        markdown_converter.ignore_links = False
-        markdown_converter.ignore_images = True
-        markdown_content = markdown_converter.handle(str(content_area))
-        return title, self._normalize_markdown(markdown_content)
-
-    def _normalize_markdown(self, text: str) -> str:
+    def _postprocess_markdown(self, text: str) -> str:
         lines = [line.rstrip() for line in text.splitlines()]
 
         while lines and lines[0] == "":
@@ -361,9 +393,41 @@ class AsyncCrawler:
             previous_blank = is_blank
 
         normalized_text = "\n".join(normalized_lines)
+        normalized_text = re.sub(r"\n{3,}", "\n\n", normalized_text)
         if not normalized_text.endswith("\n"):
             normalized_text += "\n"
         return normalized_text
+
+    def _clean_html(self, html: str, url: str) -> Tuple[str, str, bool]:
+        soup = BeautifulSoup(html, "html.parser")
+        self._remove_noise_tags(soup)
+
+        title_text = ""
+        if soup.title and soup.title.string:
+            title_text = soup.title.string.strip()
+        title = title_text or url
+
+        content_area = self._select_main_area(soup)
+        visible_length = len(content_area.get_text(" ", strip=True))
+        used_readability = False
+
+        if self.readability_fallback and visible_length < self.min_text_chars:
+            try:
+                doc = Document(html)
+                readability_html = doc.summary(html_partial=True)
+                readability_title = doc.short_title() or title
+                readability_soup = BeautifulSoup(readability_html, "html.parser")
+                self._remove_noise_tags(readability_soup)
+                content_area = self._select_main_area(readability_soup)
+                title = readability_title
+                used_readability = True
+            except Exception:  # pragma: no cover - safety net
+                used_readability = False
+
+        markdown_converter = self._create_markdown_converter()
+        markdown_content = markdown_converter.handle(str(content_area))
+        cleaned_markdown = self._postprocess_markdown(markdown_content)
+        return title, cleaned_markdown, used_readability
 
     def _extract_links(self, url: str, soup: BeautifulSoup) -> List[str]:
         links: List[str] = []
@@ -378,6 +442,51 @@ class AsyncCrawler:
                 links.append(absolute_url)
         return links
 
+    def _should_keep_line(self, line: str, frequency: int) -> bool:
+        if frequency <= 3:
+            return True
+        stripped = line.strip()
+        if not stripped:
+            return True
+        if len(stripped) <= 60 and (
+            stripped.lower()
+            in {
+                "overview",
+                "introduction",
+                "summary",
+                "contents",
+                "table of contents",
+            }
+            or stripped.startswith("# ")
+            or stripped.startswith("## ")
+        ):
+            return True
+        return False
+
+    def _apply_boilerplate_filter(self, pages: List[PageRecord]) -> List[PageRecord]:
+        line_counts: Dict[str, int] = {}
+        for page in pages:
+            for raw_line in page.markdown.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                line_counts[line] = line_counts.get(line, 0) + 1
+
+        filtered_pages: List[PageRecord] = []
+        for page in pages:
+            lines: List[str] = []
+            for raw_line in page.markdown.splitlines():
+                line = raw_line.rstrip()
+                frequency = line_counts.get(line.strip(), 0)
+                if not self._should_keep_line(line, frequency):
+                    continue
+                lines.append(line)
+            page.markdown = self._postprocess_markdown("\n".join(lines))
+            filtered_pages.append(page)
+
+        self.line_frequencies = line_counts
+        return filtered_pages
+
     async def _process_url(
         self, client: httpx.AsyncClient, url: str
     ) -> Optional[Tuple[PageRecord, List[str]]]:
@@ -387,7 +496,7 @@ class AsyncCrawler:
 
         soup = BeautifulSoup(content, "html.parser")
         links = self._extract_links(url, soup)
-        title, markdown = self._clean_html(content, url)
+        title, markdown, used_readability = self._clean_html(content, url)
         parsed_url = urlparse(url)
         host = parsed_url.hostname or self.root_domain or ""
         path = parsed_url.path or "/"
@@ -399,6 +508,7 @@ class AsyncCrawler:
             path=path or "/",
             title=title or "",
             markdown=markdown,
+            used_readability=used_readability,
         )
         return page_record, links
 
@@ -456,6 +566,9 @@ class AsyncCrawler:
                             continue
                         self.enqueued.add(link)
                         self.queue.append((link, next_depth))
+
+        if pages:
+            pages = self._apply_boilerplate_filter(pages)
 
         return pages
 

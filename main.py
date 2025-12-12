@@ -54,6 +54,29 @@ def _slugify(value: str) -> str:
     return value or "page"
 
 
+def _parse_bool_field(value: Optional[str], default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _clamp_min_text_chars(raw_value: Optional[int]) -> int:
+    if raw_value is None:
+        return 600
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 600
+    return max(200, min(value, 5000))
+
+
 def _update_last_run(crawler: AsyncCrawler, pages: List, total_chars: int) -> None:
     thin_pages = sum(1 for page in pages if len(page.markdown.strip()) < 200)
     last_run_info.update(
@@ -78,6 +101,10 @@ async def generate_knowledgebase(
     max_pages: Optional[int] = Form(10),
     allowed_hosts: Optional[str] = Form(None),
     path_prefixes: Optional[str] = Form(None),
+    strip_links: Optional[str] = Form("true"),
+    strip_images: Optional[str] = Form("true"),
+    readability_fallback: Optional[str] = Form("true"),
+    min_text_chars: Optional[int] = Form(600),
 ):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
@@ -85,6 +112,10 @@ async def generate_knowledgebase(
     pages_to_crawl = _clamp_max_pages(max_pages)
     allowed = _parse_list_field(allowed_hosts)
     prefixes = _parse_list_field(path_prefixes)
+    strip_links_bool = _parse_bool_field(strip_links, True)
+    strip_images_bool = _parse_bool_field(strip_images, True)
+    readability_bool = _parse_bool_field(readability_fallback, True)
+    min_text_value = _clamp_min_text_chars(min_text_chars)
 
     crawler = AsyncCrawler(
         start_url=url,
@@ -92,6 +123,10 @@ async def generate_knowledgebase(
         include_subdomains=True,
         allowed_hosts=allowed,
         path_prefixes=prefixes,
+        strip_links=strip_links_bool,
+        strip_images=strip_images_bool,
+        readability_fallback=readability_bool,
+        min_text_chars=min_text_value,
     )
 
     pages = await crawler.crawl_with_pages()
@@ -133,6 +168,10 @@ async def crawl_preview(
     max_pages: Optional[int] = Form(10),
     allowed_hosts: Optional[str] = Form(None),
     path_prefixes: Optional[str] = Form(None),
+    strip_links: Optional[str] = Form("true"),
+    strip_images: Optional[str] = Form("true"),
+    readability_fallback: Optional[str] = Form("true"),
+    min_text_chars: Optional[int] = Form(600),
 ):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
@@ -140,6 +179,10 @@ async def crawl_preview(
     pages_to_crawl = _clamp_max_pages(max_pages)
     allowed = _parse_list_field(allowed_hosts)
     prefixes = _parse_list_field(path_prefixes)
+    strip_links_bool = _parse_bool_field(strip_links, True)
+    strip_images_bool = _parse_bool_field(strip_images, True)
+    readability_bool = _parse_bool_field(readability_fallback, True)
+    min_text_value = _clamp_min_text_chars(min_text_chars)
 
     crawler = AsyncCrawler(
         start_url=url,
@@ -147,6 +190,10 @@ async def crawl_preview(
         include_subdomains=True,
         allowed_hosts=allowed,
         path_prefixes=prefixes,
+        strip_links=strip_links_bool,
+        strip_images=strip_images_bool,
+        readability_fallback=readability_bool,
+        min_text_chars=min_text_value,
     )
 
     pages = await crawler.crawl_with_pages()
@@ -184,6 +231,10 @@ async def download_selected(payload=Body(...)):
     allowed_hosts = payload.get("allowed_hosts") or []
     path_prefixes = payload.get("path_prefixes") or []
     pages = payload.get("pages", [])
+    strip_links = _parse_bool_field(payload.get("strip_links"), True)
+    strip_images = _parse_bool_field(payload.get("strip_images"), True)
+    readability_fallback = _parse_bool_field(payload.get("readability_fallback"), True)
+    min_text_chars = _clamp_min_text_chars(payload.get("min_text_chars"))
 
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
@@ -196,6 +247,10 @@ async def download_selected(payload=Body(...)):
         include_subdomains=True,
         allowed_hosts=allowed_hosts,
         path_prefixes=path_prefixes,
+        strip_links=strip_links,
+        strip_images=strip_images,
+        readability_fallback=readability_fallback,
+        min_text_chars=min_text_chars,
     )
 
     buffer = io.BytesIO()
@@ -215,12 +270,12 @@ async def download_selected(payload=Body(...)):
                 if not content:
                     continue
 
-                title, markdown = crawler._clean_html(content, page_url)
+                title, markdown, _ = crawler._clean_html(content, page_url)
                 host = page.get("host") or (urlparse(page_url).hostname or "")
                 heading = page.get("title") or page.get("path") or title
 
                 body = f"# {host}\n## {heading}\n\n{markdown}"
-                normalized_body = crawler._normalize_markdown(body)
+                normalized_body = crawler._postprocess_markdown(body)
                 zip_file.writestr(filename, normalized_body)
                 added_files += 1
 

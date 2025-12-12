@@ -177,6 +177,26 @@
             border-radius: 16px;
             padding: 18px 20px;
         }
+        .options-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 12px;
+            padding: 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            background: #f9fafb;
+        }
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            color: #111827;
+        }
+        .checkbox-row input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+        }
         .panel-header {
             display: flex;
             align-items: center;
@@ -325,6 +345,28 @@
                 <input type="text" id="path-prefixes-input" name="path_prefixes" placeholder="e.g. /, /help, /docs">
                 <p class="helper">Only crawl URLs that start with these prefixes.</p>
             </div>
+            <div>
+                <label>Content extraction</label>
+                <div class="options-grid">
+                    <label class="checkbox-row">
+                        <input type="checkbox" id="strip-links-input" name="strip_links" checked>
+                        Strip links (remove URLs, keep anchor text)
+                    </label>
+                    <label class="checkbox-row">
+                        <input type="checkbox" id="strip-images-input" name="strip_images" checked>
+                        Strip images
+                    </label>
+                    <label class="checkbox-row">
+                        <input type="checkbox" id="readability-input" name="readability_fallback" checked>
+                        Aggressive main extraction (readability)
+                    </label>
+                    <div>
+                        <label for="min-text-chars-input">Min text chars before fallback</label>
+                        <input type="number" id="min-text-chars-input" name="min_text_chars" min="200" max="5000" value="600">
+                        <p class="helper">If extracted text is shorter, readability is used.</p>
+                    </div>
+                </div>
+            </div>
             <div class="actions">
                 <div style="flex:1; max-width: 220px;">
                     <label for="max-pages-input">Max pages</label>
@@ -409,6 +451,10 @@
         const diagnosticsErrors = document.getElementById('diagnostics-errors');
         const diagnosticsItems = document.getElementById('diagnostics-items');
         const diagnosticsMeta = document.getElementById('diagnostics-meta');
+        const stripLinksInput = document.getElementById('strip-links-input');
+        const stripImagesInput = document.getElementById('strip-images-input');
+        const readabilityInput = document.getElementById('readability-input');
+        const minTextCharsInput = document.getElementById('min-text-chars-input');
 
         let previewPages = [];
         let isDownloadingSelected = false;
@@ -531,6 +577,10 @@
             setLoading(true);
 
             const formData = new FormData(form);
+            formData.set('strip_links', stripLinksInput.checked ? 'true' : 'false');
+            formData.set('strip_images', stripImagesInput.checked ? 'true' : 'false');
+            formData.set('readability_fallback', readabilityInput.checked ? 'true' : 'false');
+            formData.set('min_text_chars', minTextCharsInput.value || '600');
             try {
                 const response = await fetch('/generate', {
                     method: 'POST',
@@ -577,6 +627,10 @@
             setScanLoading(true);
 
             const formData = new FormData(form);
+            formData.set('strip_links', stripLinksInput.checked ? 'true' : 'false');
+            formData.set('strip_images', stripImagesInput.checked ? 'true' : 'false');
+            formData.set('readability_fallback', readabilityInput.checked ? 'true' : 'false');
+            formData.set('min_text_chars', minTextCharsInput.value || '600');
             try {
                 const response = await fetch('/crawl-preview', {
                     method: 'POST',
@@ -726,6 +780,10 @@
                 max_pages: Number(document.getElementById('max-pages-input').value || 10),
                 allowed_hosts: parseInputList(allowedHostsInput),
                 path_prefixes: parseInputList(pathPrefixesInput),
+                strip_links: stripLinksInput.checked,
+                strip_images: stripImagesInput.checked,
+                readability_fallback: readabilityInput.checked,
+                min_text_chars: Number(minTextCharsInput.value || 600),
                 pages: selectedPages,
             };
 
