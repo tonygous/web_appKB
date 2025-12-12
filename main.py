@@ -8,6 +8,7 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
@@ -37,6 +38,7 @@ GIT_SHA = _detect_git_sha()
 
 app = FastAPI(title="Web-to-KnowledgeBase")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 last_run_info = {
@@ -57,7 +59,11 @@ async def read_root(request: Request):
             detail=f"Template not found: {template_path}",
         )
 
-    return templates.TemplateResponse(request, "index.html", {"request": request})
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {"request": request, "build_tag": BUILD_TIME},
+    )
 
 
 @app.get("/healthz")
