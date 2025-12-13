@@ -6,7 +6,37 @@ const diagnosticsPanel = document.getElementById('diagnostics-panel');
 const crawlForm = document.getElementById('crawl-form');
 const loadDiagnosticsBtn = document.getElementById('load-diagnostics');
 const generateBtn = document.getElementById('generate-btn');
+const summaryCard = document.getElementById('run-summary');
+const summaryNote = document.getElementById('summary-note');
+const summaryPages = document.getElementById('summary-pages');
+const summaryErrors = document.getElementById('summary-errors');
+const summarySkipped = document.getElementById('summary-skipped');
 let pollTimer = null;
+
+const renderSummary = (data = {}, noteText = '') => {
+    if (!summaryCard) return;
+    const pages = data.pages_count ?? 0;
+    const errors = Array.isArray(data.errors) ? data.errors.length : data.errors || 0;
+    const skipped = data.skipped_links ?? 0;
+    summaryPages.textContent = pages;
+    summaryErrors.textContent = errors;
+    summarySkipped.textContent = skipped;
+    if (summaryNote) {
+        const timedOut = Boolean(data.timed_out);
+        summaryNote.textContent = noteText || (timedOut ? 'Timed out before finishing.' : 'Latest run ready.');
+    }
+};
+
+const refreshSummary = async (noteText = '') => {
+    try {
+        const res = await fetch('/debug/last-run');
+        if (!res.ok) return;
+        const data = await res.json();
+        renderSummary(data, noteText);
+    } catch (err) {
+        console.error('Failed to refresh summary', err);
+    }
+};
 
 const setLoading = (isLoading) => {
     const controls = document.querySelectorAll('input, button, select, textarea');
@@ -65,6 +95,7 @@ const pollDiagnostics = () => {
             const data = await res.json();
             const message = `Crawling… Pages: ${data.pages_count || 0}, Thin pages: ${data.thin_pages_count || 0}, Errors: ${data.errors?.length || 0}`;
             progressText.textContent = message;
+            renderSummary(data, 'Crawling in progress…');
         } catch (err) {
             console.error('Diagnostics poll failed', err);
         }
@@ -84,7 +115,8 @@ const handleSubmit = async (event) => {
     const mode = submitter?.value === 'zip' ? 'zip' : 'combined';
 
     showError('');
-    progressText.textContent = 'Crawling… this can take up to 60 seconds';
+    progressText.textContent = 'Crawling… this can take up to 90 seconds';
+    renderSummary({ pages_count: 0, errors: [], skipped_links: 0, timed_out: false }, 'Starting crawl…');
     setLoading(true);
     pollDiagnostics();
 
@@ -121,15 +153,18 @@ const handleSubmit = async (event) => {
             }
             showError(message);
             progressText.textContent = 'Crawl failed. Please review diagnostics.';
+            await refreshSummary('Last attempt failed.');
             return;
         }
 
         await downloadBlob(response);
         progressText.textContent = 'Download ready. Check your files.';
+        await refreshSummary('Download ready.');
     } catch (err) {
         console.error(err);
         showError('Network error: ' + err.message);
         progressText.textContent = 'Network error. Please try again.';
+        await refreshSummary('Network error during crawl.');
     } finally {
         setLoading(false);
         stopPolling();
@@ -197,3 +232,4 @@ const loadDiagnostics = async () => {
 
 crawlForm?.addEventListener('submit', handleSubmit);
 loadDiagnosticsBtn?.addEventListener('click', loadDiagnostics);
+refreshSummary('Awaiting first run.');

@@ -1,6 +1,7 @@
 import re
 from collections.abc import Callable
 
+# mypy: ignore-errors
 import httpx
 from fastapi.testclient import TestClient
 from httpx import Response

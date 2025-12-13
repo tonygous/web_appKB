@@ -87,6 +87,21 @@
                     </div>
 
                     <p class="helper" id="progress-text">Ready to crawl.</p>
+                    <div class="summary" id="run-summary" aria-live="polite">
+                        <div class="summary__row">
+                            <span>Pages</span>
+                            <strong id="summary-pages">0</strong>
+                        </div>
+                        <div class="summary__row">
+                            <span>Errors</span>
+                            <strong id="summary-errors">0</strong>
+                        </div>
+                        <div class="summary__row">
+                            <span>Skipped</span>
+                            <strong id="summary-skipped">0</strong>
+                        </div>
+                        <p class="helper" id="summary-note">Awaiting first run.</p>
+                    </div>
                 </form>
             </section>
 
@@ -114,7 +129,7 @@
     <div class="loading-overlay" id="loading-overlay" aria-hidden="true">
         <div class="loading-overlay__content">
             <div class="loader" role="status" aria-label="Loading"></div>
-            <p id="loading-message">Crawling… this can take up to 60 seconds.</p>
+            <p id="loading-message">Crawling… this can take up to 90 seconds.</p>
         </div>
     </div>
 
