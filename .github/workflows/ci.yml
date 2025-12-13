@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -14,27 +14,21 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
-          python -m venv .venv
-          source .venv/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          pip install -r requirements.txt
+
+      - name: Ruff format
+        run: ruff format --check .
 
       - name: Ruff lint
-        run: |
-          source .venv/bin/activate
-          ruff check .
+        run: ruff check .
 
-      - name: Ruff format check
-        run: |
-          source .venv/bin/activate
-          ruff format --check .
+      - name: Mypy
+        run: mypy .
 
-      - name: Run tests
-        run: |
-          source .venv/bin/activate
-          pytest -q
+      - name: Pytest
+        run: pytest -q

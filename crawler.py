@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import logging
 import random
 import re
@@ -52,7 +53,7 @@ class AsyncCrawler:
         start_url: str,
         max_pages: int = 50,
         timeout: float = 10.0,
-        crawl_timeout: float = 120.0,
+        crawl_timeout: float = 90.0,
         include_subdomains: bool = False,
         allowed_hosts: Optional[Sequence[str]] = None,
         path_prefixes: Optional[Sequence[str]] = None,
@@ -68,8 +69,13 @@ class AsyncCrawler:
         remove_additional_noise: bool = True,
         main_selectors: Optional[Sequence[str]] = None,
         render_mode: str = "http",
+        transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
-        self.start_url = self._normalize_url(start_url)
+        normalized_start = self._normalize_url(start_url)
+        if not normalized_start or self._is_blocked_url(normalized_start):
+            raise ValueError("Start URL must be a public http(s) address.")
+
+        self.start_url = normalized_start
         self.max_pages = max(1, min(max_pages, 500))
         self.timeout = timeout
         self.crawl_timeout = crawl_timeout
@@ -85,6 +91,7 @@ class AsyncCrawler:
         self.request_timeout = httpx.Timeout(
             timeout, connect=timeout, read=timeout, write=timeout, pool=timeout
         )
+        self.transport = transport
 
         self.strip_links = strip_links
         self.strip_images = strip_images
@@ -121,6 +128,7 @@ class AsyncCrawler:
         self.errors: List[Dict[str, str]] = []
         self.diagnostics: List[Dict[str, object]] = []
         self.timed_out: bool = False
+        self.skipped_links: int = 0
         self.line_frequencies: Dict[str, int] = {}
         self.logger = logging.getLogger(__name__)
 
@@ -135,6 +143,23 @@ class AsyncCrawler:
                 continue
             normalized.append(host.strip().lower())
         return normalized
+
+    def _is_blocked_host(self, host: str) -> bool:
+        lowered = host.lower()
+        if lowered in {"localhost", "127.0.0.1", "::1"}:
+            return True
+        try:
+            ip_value = ipaddress.ip_address(lowered)
+            return ip_value.is_private or ip_value.is_loopback or ip_value.is_link_local
+        except ValueError:
+            return False
+
+    def _is_blocked_url(self, url: str) -> bool:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return True
+        host = parsed.hostname or ""
+        return self._is_blocked_host(host)
 
     def _normalize_prefixes(self, prefixes: Optional[Sequence[str]]) -> List[str]:
         if not prefixes:
@@ -160,6 +185,9 @@ class AsyncCrawler:
         parsed = urlparse(url)
         if not parsed.scheme:
             parsed = urlparse(f"https://{url}")
+
+        if parsed.scheme not in {"http", "https"}:
+            return ""
 
         query_parts: List[Tuple[str, str]] = []
         tracking_prefixes = {"utm_"}
@@ -237,6 +265,8 @@ class AsyncCrawler:
             return False
 
         hostname = (parsed.hostname or "").lower()
+        if self._is_blocked_host(hostname):
+            return False
         if hostname == "":
             return True
 
@@ -353,6 +383,9 @@ class AsyncCrawler:
         return False
 
     async def _can_visit_url(self, client: httpx.AsyncClient, url: str) -> bool:
+        if self._is_blocked_url(url):
+            self._record_error(url, "blocked-host")
+            return False
         if self.respect_robots:
             await self._ensure_robots_rules(client, url)
             if self._is_disallowed_by_robots(url):
@@ -393,6 +426,8 @@ class AsyncCrawler:
             headers=default_headers,
             follow_redirects=True,
             timeout=self.request_timeout,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
+            transport=self.transport,
         )
 
     async def _fetch_http_content(
@@ -652,6 +687,7 @@ class AsyncCrawler:
             title, markdown, used_readability = self._clean_html(html, source_url)
             return title, markdown, used_readability, len(markdown.strip())
 
+        # TODO: add richer Playwright scraping for heavy client-side apps.
         renderer_used = "http"
         final_url = url
         title = ""
@@ -936,8 +972,10 @@ class AsyncCrawler:
                 ):
                     current_url, depth = self.queue.popleft()
                     if current_url in self.visited:
+                        self.skipped_links += 1
                         continue
                     if not await self._can_visit_url(client, current_url):
+                        self.skipped_links += 1
                         continue
                     self.visited.add(current_url)
                     task_urls.append((current_url, depth))
@@ -962,18 +1000,31 @@ class AsyncCrawler:
                     for link in links:
                         next_depth = depth + 1
                         if next_depth > self.max_depth:
+                            self.skipped_links += 1
                             continue
                         if len(self.visited) + len(self.queue) >= self.max_pages:
                             break
                         if link in self.visited or link in self.enqueued:
+                            self.skipped_links += 1
                             continue
                         if not await self._can_enqueue_url(client, link):
+                            self.skipped_links += 1
                             continue
                         self.enqueued.add(link)
                         self.queue.append((link, next_depth))
 
         if pages:
             pages = self._apply_boilerplate_filter(pages)
+
+        self.logger.info(
+            "Crawl finished",
+            extra={
+                "pages": len(pages),
+                "skipped": self.skipped_links,
+                "errors": len(self.errors),
+                "timed_out": self.timed_out,
+            },
+        )
 
         return pages
 
@@ -986,6 +1037,7 @@ class AsyncCrawler:
         # summary (в HTML-комментарии, чтобы не мешать рендеру)
         summary_lines: List[str] = ["<!-- Crawl summary:"]
         summary_lines.append(f"Total pages: {len(pages)}")
+        summary_lines.append(f"Skipped links: {self.skipped_links}")
         summary_lines.append(f"Errors: {len(self.errors)}")
         if self.errors:
             for err in self.errors[:20]:

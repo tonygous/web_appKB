@@ -1,4 +1,5 @@
 import io
+import ipaddress
 import re
 import subprocess
 import zipfile
@@ -8,8 +9,8 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from connectors.importer import ImportConnector
@@ -17,6 +18,8 @@ from crawler import AsyncCrawler
 
 BUILD_TIME = datetime.utcnow().isoformat() + "Z"
 TEMPLATES_DIR = Path("templates")
+CRAWL_TIMEOUT_SECONDS = 90.0
+MAX_CONCURRENCY = 8
 
 
 def _detect_git_sha() -> str:
@@ -47,6 +50,8 @@ last_run_info = {
     "pages_count": 0,
     "thin_pages_count": 0,
     "total_chars": 0,
+    "skipped_links": 0,
+    "timed_out": False,
 }
 
 
@@ -87,6 +92,8 @@ async def debug_last_run():
         "diagnostics": last_run_info.get("diagnostics", []),
         "pages_count": last_run_info.get("pages_count", 0),
         "thin_pages_count": last_run_info.get("thin_pages_count", 0),
+        "skipped_links": last_run_info.get("skipped_links", 0),
+        "timed_out": last_run_info.get("timed_out", False),
     }
 
 
@@ -190,13 +197,39 @@ def _update_last_run(crawler: AsyncCrawler, pages: List, total_chars: int) -> No
             "pages_count": len(pages),
             "thin_pages_count": thin_pages,
             "total_chars": total_chars,
+            "skipped_links": crawler.skipped_links,
+            "timed_out": crawler.timed_out,
         }
     )
 
 
-def _clamp_max_pages(raw_value: Optional[int]) -> int:
-    pages = raw_value or 1
-    return max(1, min(pages, 500))
+def _validate_max_pages(raw_value: Optional[int]) -> int:
+    try:
+        pages = int(raw_value) if raw_value is not None else 10
+    except (TypeError, ValueError):
+        pages = 1
+    if pages > 500:
+        raise HTTPException(status_code=400, detail="max_pages cannot exceed 500")
+    return max(1, pages)
+
+
+def _ensure_public_url(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{url}")
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="Only http(s) URLs are allowed.")
+
+    host = parsed.hostname or ""
+    try:
+        ip_value = ipaddress.ip_address(host)
+        if ip_value.is_private or ip_value.is_loopback or ip_value.is_link_local:
+            raise HTTPException(status_code=400, detail="Target host is not allowed.") from None
+    except ValueError:
+        if host.lower() == "localhost":
+            raise HTTPException(status_code=400, detail="Target host is not allowed.") from None
+
+    return parsed.geturl()
 
 
 def _parse_render_mode(value: Optional[str]) -> str:
@@ -227,7 +260,9 @@ async def generate_knowledgebase(
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
 
-    pages_to_crawl = _clamp_max_pages(max_pages)
+    safe_url = _ensure_public_url(url)
+
+    pages_to_crawl = _validate_max_pages(max_pages)
     allowed = _parse_list_field(allowed_hosts)
     prefixes = _parse_list_field(path_prefixes)
     include_subdomains_bool = _parse_bool_field(include_subdomains, False)
@@ -241,7 +276,7 @@ async def generate_knowledgebase(
     render_mode_value = _parse_render_mode(render_mode)
 
     crawler = AsyncCrawler(
-        start_url=url,
+        start_url=safe_url,
         max_pages=pages_to_crawl,
         include_subdomains=include_subdomains_bool,
         allowed_hosts=allowed,
@@ -254,6 +289,8 @@ async def generate_knowledgebase(
         readability_fallback=readability_bool,
         min_text_chars=min_text_value,
         render_mode=render_mode_value,
+        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
+        max_concurrent_requests=MAX_CONCURRENCY,
     )
 
     pages = await crawler.crawl_with_pages()
@@ -308,7 +345,9 @@ async def crawl_preview(
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
 
-    pages_to_crawl = _clamp_max_pages(max_pages)
+    safe_url = _ensure_public_url(url)
+
+    pages_to_crawl = _validate_max_pages(max_pages)
     allowed = _parse_list_field(allowed_hosts)
     prefixes = _parse_list_field(path_prefixes)
     include_subdomains_bool = _parse_bool_field(include_subdomains, False)
@@ -322,7 +361,7 @@ async def crawl_preview(
     render_mode_value = _parse_render_mode(render_mode)
 
     crawler = AsyncCrawler(
-        start_url=url,
+        start_url=safe_url,
         max_pages=pages_to_crawl,
         include_subdomains=include_subdomains_bool,
         allowed_hosts=allowed,
@@ -335,6 +374,8 @@ async def crawl_preview(
         readability_fallback=readability_bool,
         min_text_chars=min_text_value,
         render_mode=render_mode_value,
+        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
+        max_concurrent_requests=MAX_CONCURRENCY,
     )
 
     pages = await crawler.crawl_with_pages()
@@ -387,9 +428,12 @@ async def download_selected(payload=Body(...)):
     if not pages:
         raise HTTPException(status_code=400, detail="No pages selected.")
 
+    safe_url = _ensure_public_url(url)
+    pages_to_crawl = _validate_max_pages(max_pages)
+
     crawler = AsyncCrawler(
-        start_url=url,
-        max_pages=_clamp_max_pages(max_pages),
+        start_url=safe_url,
+        max_pages=pages_to_crawl,
         include_subdomains=include_subdomains,
         allowed_hosts=allowed_hosts,
         path_prefixes=path_prefixes,
@@ -401,6 +445,8 @@ async def download_selected(payload=Body(...)):
         readability_fallback=readability_fallback,
         min_text_chars=min_text_chars,
         render_mode=render_mode,
+        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
+        max_concurrent_requests=MAX_CONCURRENCY,
     )
 
     buffer = io.BytesIO()
@@ -510,7 +556,10 @@ def _validate_urls(urls: List[str]) -> List[str]:
     unique_urls = []
     for url in urls:
         normalized = str(url).strip()
-        if not normalized or normalized in seen:
+        if not normalized:
+            continue
+        normalized = _ensure_public_url(normalized)
+        if normalized in seen:
             continue
         seen.add(normalized)
         unique_urls.append(normalized)
@@ -535,6 +584,8 @@ async def bulk_combined(payload=Body(...)):
         strip_images=options["strip_images"],
         readability_fallback=options["readability_fallback"],
         min_text_chars=options["min_text_chars"],
+        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
+        max_concurrent_requests=MAX_CONCURRENCY,
     )
 
     pages = []
@@ -581,6 +632,8 @@ async def bulk_zip(payload=Body(...)):
         strip_images=options["strip_images"],
         readability_fallback=options["readability_fallback"],
         min_text_chars=options["min_text_chars"],
+        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
+        max_concurrent_requests=MAX_CONCURRENCY,
     )
 
     buffer = io.BytesIO()
