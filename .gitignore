@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.DS_Store
+*.log
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+reproduce_error.ps1
+reproduce_empty.ps1

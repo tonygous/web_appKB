@@ -37,6 +37,12 @@
                         <input id="url" name="url" type="url" placeholder="https://example.com" required>
                     </div>
 
+                    <div class="field">
+                        <label for="allowed_hosts">Allowed Hosts (optional)</label>
+                        <input id="allowed_hosts" name="allowed_hosts" type="text" placeholder="api.example.com, docs.example.com">
+                        <p class="helper">Comma-separated domains to include. Leave empty to allow only the start host.</p>
+                    </div>
+
                     <div class="field-grid">
                         <div class="field">
                             <label for="max_pages">Max pages</label>

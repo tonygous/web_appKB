@@ -6,14 +6,13 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from typing import Deque, Dict, List, Sequence, Set, Tuple
+from urllib.parse import parse_qsl, urldefrag, urlencode, urljoin, urlparse, urlunparse
 
+import html2text
 import httpx
 from bs4 import BeautifulSoup
-import html2text
 from readability import Document
-
 
 IGNORED_EXTENSIONS = {
     ".png",
@@ -55,8 +54,8 @@ class AsyncCrawler:
         timeout: float = 10.0,
         crawl_timeout: float = 90.0,
         include_subdomains: bool = False,
-        allowed_hosts: Optional[Sequence[str]] = None,
-        path_prefixes: Optional[Sequence[str]] = None,
+        allowed_hosts: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
         max_depth: int = 3,
         max_concurrent_requests: int = 8,
         respect_robots: bool = True,
@@ -67,9 +66,9 @@ class AsyncCrawler:
         min_text_chars: int = 600,
         readability_fallback: bool = True,
         remove_additional_noise: bool = True,
-        main_selectors: Optional[Sequence[str]] = None,
+        main_selectors: Sequence[str] | None = None,
         render_mode: str = "http",
-        transport: Optional[httpx.BaseTransport] = None,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         normalized_start = self._normalize_url(start_url)
         if not normalized_start or self._is_blocked_url(normalized_start):
@@ -134,7 +133,7 @@ class AsyncCrawler:
 
         self._retry_statuses = {408, 425, 429, 500, 502, 503, 504}
 
-    def _normalize_hosts(self, hosts: Optional[Sequence[str]]) -> List[str]:
+    def _normalize_hosts(self, hosts: Sequence[str] | None) -> List[str]:
         if not hosts:
             return []
         normalized: List[str] = []
@@ -161,7 +160,7 @@ class AsyncCrawler:
         host = parsed.hostname or ""
         return self._is_blocked_host(host)
 
-    def _normalize_prefixes(self, prefixes: Optional[Sequence[str]]) -> List[str]:
+    def _normalize_prefixes(self, prefixes: Sequence[str] | None) -> List[str]:
         if not prefixes:
             return []
         normalized: List[str] = []
@@ -171,7 +170,7 @@ class AsyncCrawler:
             normalized.append(prefix.strip())
         return normalized
 
-    def _extract_canonical(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
+    def _extract_canonical(self, soup: BeautifulSoup, base_url: str) -> str | None:
         canonical_link = soup.find("link", rel=lambda value: value and "canonical" in value.lower())
         if canonical_link and canonical_link.get("href"):
             candidate = self._normalize_url(urljoin(base_url, canonical_link.get("href")))
@@ -182,6 +181,10 @@ class AsyncCrawler:
     def _normalize_url(self, url: str) -> str:
         if not url:
             return ""
+        
+        # 1. Remove fragment immediately
+        url, _ = urldefrag(url)
+        
         parsed = urlparse(url)
         if not parsed.scheme:
             parsed = urlparse(f"https://{url}")
@@ -191,8 +194,9 @@ class AsyncCrawler:
 
         query_parts: List[Tuple[str, str]] = []
         tracking_prefixes = {"utm_"}
-        tracking_keys = {"gclid", "fbclid", "mc_cid", "mc_eid"}
+        tracking_keys = {"gclid", "fbclid", "mc_cid", "mc_eid", "ref", "source"}
 
+        # 2. Sort and filter query params
         for key, value in parse_qsl(parsed.query, keep_blank_values=True):
             lowered = key.lower()
             if any(lowered.startswith(prefix) for prefix in tracking_prefixes):
@@ -205,7 +209,10 @@ class AsyncCrawler:
         normalized_query = urlencode(query_parts, doseq=True)
 
         path = parsed.path or "/"
-        if path != "/":
+        # 3. Collapse multiple slashes (e.g. //foo//bar -> /foo/bar)
+        path = re.sub(r"/+", "/", path)
+        
+        if path != "/" and path.endswith("/"):
             path = path.rstrip("/")
 
         parsed = parsed._replace(path=path, query=normalized_query, fragment="")
@@ -220,7 +227,7 @@ class AsyncCrawler:
         trimmed_lines = [line.rstrip() for line in collapsed.splitlines()]
         return "\n".join(trimmed_lines).strip()
 
-    def _extract_root_domain(self, hostname: Optional[str]) -> str:
+    def _extract_root_domain(self, hostname: str | None) -> str:
         if not hostname:
             return ""
         parts = hostname.lower().split(".")
@@ -240,6 +247,7 @@ class AsyncCrawler:
         status: str,
         content_type: str,
         content_bytes: int,
+        extracted_chars: int = 0,
         elapsed_ms: int,
         reason: str,
         renderer: str = "http",
@@ -252,6 +260,7 @@ class AsyncCrawler:
                 "status": status,
                 "content_type": content_type,
                 "bytes": content_bytes,
+                "extracted_chars": extracted_chars,
                 "elapsed_ms": elapsed_ms,
                 "reason": reason,
                 "renderer": renderer,
@@ -403,7 +412,11 @@ class AsyncCrawler:
         return self._is_allowed_url(url)
 
     async def _can_enqueue_url(self, client: httpx.AsyncClient, url: str) -> bool:
-        if not self._has_ignored_extension(url) and self._is_internal_link(url) and self._matches_path_prefix(url):
+        if (
+            not self._has_ignored_extension(url)
+            and self._is_internal_link(url)
+            and self._matches_path_prefix(url)
+        ):
             if self.respect_robots:
                 await self._ensure_robots_rules(client, url)
                 if self._is_disallowed_by_robots(url):
@@ -432,7 +445,7 @@ class AsyncCrawler:
 
     async def _fetch_http_content(
         self, client: httpx.AsyncClient, url: str
-    ) -> Tuple[Optional[str], str]:
+    ) -> Tuple[str | None, str]:
         max_retries = 2
         attempt = 0
         while attempt <= max_retries:
@@ -529,7 +542,7 @@ class AsyncCrawler:
                 )
                 return None, url
 
-    async def _fetch_browser_content(self, url: str) -> Tuple[Optional[str], str]:
+    async def _fetch_browser_content(self, url: str) -> Tuple[str | None, str]:
         start_time = time.monotonic()
         final_url = url
         try:
@@ -579,6 +592,7 @@ class AsyncCrawler:
                     status=status_code,
                     content_type=content_type,
                     content_bytes=content_length,
+                    extracted_chars=0, # Computed later if successful
                     elapsed_ms=elapsed_ms,
                     reason="ok",
                     renderer="browser",
@@ -600,89 +614,9 @@ class AsyncCrawler:
             )
             return None, final_url
 
-    def _remove_noise_tags(self, soup: BeautifulSoup) -> None:
-        removable_tags = ["script", "style", "nav", "footer", "header", "aside"]
-        if self.remove_additional_noise:
-            removable_tags.extend(["form", "noscript", "svg", "iframe"])
-        for tag_name in removable_tags:
-            for tag in soup.find_all(tag_name):
-                tag.decompose()
-
-    def _select_main_area(self, soup: BeautifulSoup) -> BeautifulSoup:
-        for selector in self.main_selectors:
-            found = soup.select_one(selector)
-            if found:
-                return found
-        if soup.body:
-            return soup.body
-        return soup
-
-    def _create_markdown_converter(self) -> html2text.HTML2Text:
-        converter = html2text.HTML2Text()
-        converter.body_width = 0
-        converter.ignore_links = self.strip_links
-        converter.ignore_images = self.strip_images
-        converter.inline_links = False
-        converter.wrap_links = False
-        return converter
-
-    def _postprocess_markdown(self, text: str) -> str:
-        lines = [line.rstrip() for line in text.splitlines()]
-
-        while lines and lines[0] == "":
-            lines.pop(0)
-        while lines and lines[-1] == "":
-            lines.pop()
-
-        normalized_lines: List[str] = []
-        previous_blank = False
-        for line in lines:
-            is_blank = line == ""
-            if is_blank and previous_blank:
-                continue
-            normalized_lines.append(line)
-            previous_blank = is_blank
-
-        normalized_text = "\n".join(normalized_lines)
-        normalized_text = re.sub(r"\n{3,}", "\n\n", normalized_text)
-        if not normalized_text.endswith("\n"):
-            normalized_text += "\n"
-        return normalized_text
-
-    def _clean_html(self, html: str, url: str) -> Tuple[str, str, bool]:
-        soup = BeautifulSoup(html, "html.parser")
-        self._remove_noise_tags(soup)
-
-        title_text = ""
-        if soup.title and soup.title.string:
-            title_text = soup.title.string.strip()
-        title = title_text or url
-
-        content_area = self._select_main_area(soup)
-        visible_length = len(content_area.get_text(" ", strip=True))
-        used_readability = False
-
-        if self.readability_fallback and visible_length < self.min_text_chars:
-            try:
-                doc = Document(html)
-                readability_html = doc.summary(html_partial=True)
-                readability_title = doc.short_title() or title
-                readability_soup = BeautifulSoup(readability_html, "html.parser")
-                self._remove_noise_tags(readability_soup)
-                content_area = self._select_main_area(readability_soup)
-                title = readability_title
-                used_readability = True
-            except Exception:  # pragma: no cover - safety net
-                used_readability = False
-
-        markdown_converter = self._create_markdown_converter()
-        markdown_content = markdown_converter.handle(str(content_area))
-        cleaned_markdown = self._postprocess_markdown(markdown_content)
-        return title, cleaned_markdown, used_readability
-
     async def _render_page(
         self, client: httpx.AsyncClient, url: str
-    ) -> Optional[Tuple[str, str, str, bool, str, str]]:
+    ) -> Tuple[str, str, str, bool, str, str] | None:
         def _clean_and_measure(html: str, source_url: str) -> Tuple[str, str, bool, int]:
             title, markdown, used_readability = self._clean_html(html, source_url)
             return title, markdown, used_readability, len(markdown.strip())
@@ -693,10 +627,10 @@ class AsyncCrawler:
         title = ""
         markdown = ""
         used_readability = False
-        content_html: Optional[str] = None
+        content_html: str | None = None
         char_count = 0
 
-        http_content: Optional[str] = None
+        http_content: str | None = None
         http_final_url: str = url
 
         if self.render_mode in {"http", "auto"}:
@@ -734,6 +668,218 @@ class AsyncCrawler:
                         browser_content, browser_final_url
                     )
                     renderer_used = "browser"
+                elif http_content:
+                    content_html = http_content
+                else:
+                    return None
+        else:
+            if not http_content:
+                return None
+            content_html = http_content
+
+        if content_html is None:
+            return None
+
+        return (
+            content_html,
+            title,
+            markdown,
+            used_readability,
+            renderer_used,
+            final_url,
+        )
+
+    def _remove_noise_tags(self, soup: BeautifulSoup) -> None:
+        removable_tags = ["script", "style", "nav", "footer", "header", "aside"]
+        if self.remove_additional_noise:
+            removable_tags.extend(["form", "noscript", "svg", "iframe"])
+        for tag_name in removable_tags:
+            for tag in soup.find_all(tag_name):
+                tag.decompose()
+        
+        # Remove elements with noise classes/ids
+        noise_pattern = re.compile(
+            r"(cookie|consent|banner|modal|popup|subscribe|newsletter|social|share|breadcrumb|sidebar|menu|nav)",
+            re.IGNORECASE
+        )
+        for tag in soup.find_all(True):
+            if not tag.name:
+                continue
+            # Check ID
+            if tag.get("id") and noise_pattern.search(str(tag["id"])):
+                tag.decompose()
+                continue
+            # Check Class
+            classes = tag.get("class", [])
+            if isinstance(classes, list):
+                class_str = " ".join(classes)
+                if noise_pattern.search(class_str):
+                    tag.decompose()
+                    continue
+
+    def _select_main_area(self, soup: BeautifulSoup) -> BeautifulSoup:
+        # Priority 1: Semantic main tags
+        for selector in self.main_selectors:
+            found = soup.select_one(selector)
+            if found:
+                return found
+        
+        # Priority 2: Largest <div> by text length as fallback
+        largest_div = None
+        max_length = 0
+        
+        for div in soup.find_all("div"):
+            text_len = len(div.get_text(strip=True))
+            if text_len > max_length:
+                max_length = text_len
+                largest_div = div
+        
+        if largest_div and max_length > 200:
+            return largest_div
+
+        if soup.body:
+            return soup.body
+        return soup
+
+    def _create_markdown_converter(self) -> html2text.HTML2Text:
+        converter = html2text.HTML2Text()
+        converter.body_width = 0
+        converter.ignore_links = self.strip_links
+        converter.ignore_images = self.strip_images
+        converter.inline_links = False
+        converter.wrap_links = False
+        converter.mark_code = True # Preserve code blocks
+        return converter
+
+    def _postprocess_markdown(self, text: str) -> str:
+        # Convert html2text [code] blocks to fenced blocks
+        text = text.replace("[code]", "```\n").replace("[/code]", "\n```")
+        
+        lines = [line.rstrip() for line in text.splitlines()]
+
+        while lines and lines[0] == "":
+            lines.pop(0)
+        while lines and lines[-1] == "":
+            lines.pop()
+
+        normalized_lines: List[str] = []
+        previous_blank = False
+        for line in lines:
+            is_blank = line == ""
+            if is_blank and previous_blank:
+                continue
+            normalized_lines.append(line)
+            previous_blank = is_blank
+
+        normalized_text = "\n".join(normalized_lines)
+        normalized_text = re.sub(r"\n{3,}", "\n\n", normalized_text)
+        if not normalized_text.endswith("\n"):
+            normalized_text += "\n"
+        return normalized_text
+
+    def _clean_html(self, html: str, url: str) -> Tuple[str, str, bool]:
+        soup = BeautifulSoup(html, "html.parser")
+        self._remove_noise_tags(soup)
+
+        title_text = ""
+        if soup.title and soup.title.string:
+            title_text = soup.title.string.strip()
+        title = title_text or url
+        
+        markdown = ""
+        used_readability = False
+        
+        # Try Readability FIRST
+        try:
+            doc = Document(str(soup))
+            readability_html = doc.summary(html_partial=True)
+            readability_title = doc.short_title() or title
+            
+            readability_soup = BeautifulSoup(readability_html, "html.parser")
+            self._remove_noise_tags(readability_soup)
+            
+            # Check if readability gave us enough content
+            text_content = readability_soup.get_text(" ", strip=True)
+            if len(text_content) >= self.min_text_chars:
+                content_area = readability_soup
+                title = readability_title
+                used_readability = True
+            else:
+                # Fallback to selector-based extraction on ORIGINAL soup (cleaned)
+                content_area = self._select_main_area(soup)
+        except Exception:
+            # Fallback on error
+            content_area = self._select_main_area(soup)
+
+        markdown_converter = self._create_markdown_converter()
+        markdown_content = markdown_converter.handle(str(content_area))
+        cleaned_markdown = self._postprocess_markdown(markdown_content)
+        return title, cleaned_markdown, used_readability
+
+    def _update_last_diagnostic(self, url: str, char_count: int) -> None:
+        # Find the most recent diagnostic for this URL and update extracted_chars
+        for diag in reversed(self.diagnostics):
+            if diag["final_url"] == url or diag["url"] == url:
+                diag["extracted_chars"] = char_count
+                break
+
+    async def _render_page(
+        self, client: httpx.AsyncClient, url: str
+    ) -> Tuple[str, str, str, bool, str, str] | None:
+        def _clean_and_measure(html: str, source_url: str) -> Tuple[str, str, bool, int]:
+            title, markdown, used_readability = self._clean_html(html, source_url)
+            return title, markdown, used_readability, len(markdown.strip())
+
+        # TODO: add richer Playwright scraping for heavy client-side apps.
+        renderer_used = "http"
+        final_url = url
+        title = ""
+        markdown = ""
+        used_readability = False
+        content_html: str | None = None
+        char_count = 0
+
+        http_content: str | None = None
+        http_final_url: str = url
+
+        if self.render_mode in {"http", "auto"}:
+            http_content, http_final_url = await self._fetch_http_content(client, url)
+            if http_content:
+                title, markdown, used_readability, char_count = _clean_and_measure(
+                    http_content, http_final_url
+                )
+                final_url = http_final_url
+                self._update_last_diagnostic(final_url, char_count)
+
+        if self.render_mode == "browser":
+            browser_content, browser_final_url = await self._fetch_browser_content(url)
+            if browser_content:
+                content_html = browser_content
+                final_url = browser_final_url
+                title, markdown, used_readability, char_count = _clean_and_measure(
+                    browser_content, browser_final_url
+                )
+                renderer_used = "browser"
+                self._update_last_diagnostic(final_url, char_count)
+            elif http_content:
+                content_html = http_content
+            else:
+                return None
+        elif self.render_mode == "auto":
+            if http_content and char_count >= self.min_text_chars:
+                content_html = http_content
+            else:
+                browser_content, browser_final_url = await self._fetch_browser_content(
+                    url
+                )
+                if browser_content:
+                    content_html = browser_content
+                    final_url = browser_final_url
+                    title, markdown, used_readability, char_count = _clean_and_measure(
+                        browser_content, browser_final_url
+                    )
+                    renderer_used = "browser"
+                    self._update_last_diagnostic(final_url, char_count)
                 elif http_content:
                     content_html = http_content
                 else:
@@ -890,7 +1036,7 @@ class AsyncCrawler:
 
     async def _process_url(
         self, client: httpx.AsyncClient, url: str
-    ) -> Optional[Tuple[PageRecord, List[str]]]:
+    ) -> Tuple[PageRecord, List[str]] | None:
         rendered = await self._render_page(client, url)
         if not rendered:
             return None
@@ -918,7 +1064,7 @@ class AsyncCrawler:
 
     async def fetch_and_clean_page(
         self, client: httpx.AsyncClient, url: str
-    ) -> Optional[PageRecord]:
+    ) -> PageRecord | None:
         normalized_url = self._normalize_url(url)
         if not normalized_url:
             return None
@@ -990,7 +1136,7 @@ class AsyncCrawler:
                     break
 
                 results = await asyncio.gather(*tasks)
-                for (current_url, depth), result in zip(task_urls, results):
+                for (current_url, depth), result in zip(task_urls, results, strict=False):
                     if not result:
                         continue
                     page_record, links = result

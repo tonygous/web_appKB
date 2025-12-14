@@ -13,7 +13,7 @@ select = [
   "ASYNC",
   "PIE",
 ]
-extend-ignore = ["UP006", "E731", "SIM103", "PIE810", "UP035", "UP045", "B008"]
+extend-ignore = ["UP006", "E731", "SIM103", "PIE810", "UP035", "B008"]
 
 [format]
 quote-style = "double"

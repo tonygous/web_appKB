@@ -58,7 +58,7 @@ def test_generate_uses_stubbed_crawler(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(AsyncCrawler, "crawl_with_pages", fake_crawl, raising=True)
     monkeypatch.setattr(AsyncCrawler, "_combine_pages", fake_combine, raising=True)
 
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
 
     async def _run():
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

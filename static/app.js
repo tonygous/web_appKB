@@ -127,6 +127,13 @@ const handleSubmit = async (event) => {
         formData.delete('mode');
     }
 
+    // Remove empty fields to prevent parsing errors with empty multipart parts
+    for (const [key, value] of Array.from(formData.entries())) {
+        if (typeof value === 'string' && value.trim() === '') {
+            formData.delete(key);
+        }
+    }
+
     try {
         const response = await fetch('/generate', {
             method: 'POST',

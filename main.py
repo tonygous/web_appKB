@@ -5,7 +5,7 @@ import subprocess
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 from urllib.parse import urlparse
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -133,7 +133,7 @@ async def import_documents(
     return StreamingResponse(archive, media_type="application/zip", headers=headers)
 
 
-def _parse_list_field(raw_value: Optional[str]) -> List[str]:
+def _parse_list_field(raw_value: str | None) -> List[str]:
     if not raw_value:
         return []
     parts = re.split(r"[,\s]+", raw_value)
@@ -155,7 +155,7 @@ def _slugify(value: str) -> str:
     return value or "page"
 
 
-def _parse_bool_field(value: Optional[str], default: bool) -> bool:
+def _parse_bool_field(value: str | None, default: bool) -> bool:
     if value is None:
         return default
     if isinstance(value, bool):
@@ -168,7 +168,7 @@ def _parse_bool_field(value: Optional[str], default: bool) -> bool:
     return default
 
 
-def _clamp_min_text_chars(raw_value: Optional[int]) -> int:
+def _clamp_min_text_chars(raw_value: int | None) -> int:
     if raw_value is None:
         return 600
     try:
@@ -178,7 +178,7 @@ def _clamp_min_text_chars(raw_value: Optional[int]) -> int:
     return max(200, min(value, 5000))
 
 
-def _clamp_max_depth(raw_value: Optional[int]) -> int:
+def _clamp_max_depth(raw_value: int | None) -> int:
     if raw_value is None:
         return 3
     try:
@@ -203,7 +203,7 @@ def _update_last_run(crawler: AsyncCrawler, pages: List, total_chars: int) -> No
     )
 
 
-def _validate_max_pages(raw_value: Optional[int]) -> int:
+def _validate_max_pages(raw_value: int | None) -> int:
     try:
         pages = int(raw_value) if raw_value is not None else 10
     except (TypeError, ValueError):
@@ -232,7 +232,7 @@ def _ensure_public_url(url: str) -> str:
     return parsed.geturl()
 
 
-def _parse_render_mode(value: Optional[str]) -> str:
+def _parse_render_mode(value: str | None) -> str:
     if not value:
         return "http"
     normalized = str(value).strip().lower()
@@ -244,18 +244,18 @@ def _parse_render_mode(value: Optional[str]) -> str:
 @app.post("/generate")
 async def generate_knowledgebase(
     url: str = Form(...),
-    max_pages: Optional[int] = Form(10),
-    allowed_hosts: Optional[str] = Form(None),
-    path_prefixes: Optional[str] = Form(None),
-    include_subdomains: Optional[str] = Form("false"),
-    respect_robots: Optional[str] = Form("true"),
-    use_sitemap: Optional[str] = Form("true"),
-    max_depth: Optional[int] = Form(3),
-    strip_links: Optional[str] = Form("true"),
-    strip_images: Optional[str] = Form("true"),
-    readability_fallback: Optional[str] = Form("true"),
-    min_text_chars: Optional[int] = Form(600),
-    render_mode: Optional[str] = Form("http"),
+    max_pages: int | None = Form(10),
+    allowed_hosts: str = Form(""),
+    path_prefixes: str = Form(""),
+    include_subdomains: str | None = Form("false"),
+    respect_robots: str | None = Form("true"),
+    use_sitemap: str | None = Form("true"),
+    max_depth: int | None = Form(3),
+    strip_links: str | None = Form("true"),
+    strip_images: str | None = Form("true"),
+    readability_fallback: str | None = Form("true"),
+    min_text_chars: int | None = Form(600),
+    render_mode: str | None = Form("http"),
 ):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
@@ -329,18 +329,18 @@ async def generate_knowledgebase(
 @app.post("/crawl-preview")
 async def crawl_preview(
     url: str = Form(...),
-    max_pages: Optional[int] = Form(10),
-    allowed_hosts: Optional[str] = Form(None),
-    path_prefixes: Optional[str] = Form(None),
-    include_subdomains: Optional[str] = Form("false"),
-    respect_robots: Optional[str] = Form("true"),
-    use_sitemap: Optional[str] = Form("true"),
-    max_depth: Optional[int] = Form(3),
-    strip_links: Optional[str] = Form("true"),
-    strip_images: Optional[str] = Form("true"),
-    readability_fallback: Optional[str] = Form("true"),
-    min_text_chars: Optional[int] = Form(600),
-    render_mode: Optional[str] = Form("http"),
+    max_pages: int | None = Form(10),
+    allowed_hosts: str | None = Form(None),
+    path_prefixes: str | None = Form(None),
+    include_subdomains: str | None = Form("false"),
+    respect_robots: str | None = Form("true"),
+    use_sitemap: str | None = Form("true"),
+    max_depth: int | None = Form(3),
+    strip_links: str | None = Form("true"),
+    strip_images: str | None = Form("true"),
+    readability_fallback: str | None = Form("true"),
+    min_text_chars: int | None = Form(600),
+    render_mode: str | None = Form("http"),
 ):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required.")
