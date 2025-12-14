@@ -26,6 +26,10 @@
     --gap-lg: 32px;
 }
 
+html {
+    color-scheme: light;
+}
+
 * {
     box-sizing: border-box;
 }
@@ -177,7 +181,8 @@ textarea {
     border: 1px solid var(--border-light);
     border-radius: var(--radius-md);
     font-size: 0.95rem;
-    color: var(--text-main);
+    color: #0f172a !important;
+    background: #ffffff !important;
     transition: all 0.2s ease;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
 }
@@ -190,8 +195,9 @@ textarea:focus {
     box-shadow: 0 0 0 3px var(--border-focus);
 }
 
-input::placeholder {
-    color: #94a3b8;
+input::placeholder,
+textarea::placeholder {
+    color: #64748b !important;
 }
 
 .helper {
@@ -271,6 +277,10 @@ details[open] summary::after {
     display: flex;
     gap: 1rem;
     margin-top: 1rem;
+}
+
+.actions--wrap {
+    flex-wrap: wrap;
 }
 
 .actions--end {
@@ -467,4 +477,85 @@ details[open] summary::after {
     border-radius: 50%;
     border-top-color: var(--primary);
     animation: spin 1s linear infinite;
+}
+
+/* Preview list */
+.preview__controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    align-items: end;
+    gap: 1rem;
+}
+
+.preview__select-all {
+    align-self: center;
+    padding: 0.5rem 0.75rem;
+    border: 1px dashed var(--border-light);
+    border-radius: var(--radius-md);
+    background: #f8fafc;
+}
+
+.preview__meta {
+    display: flex;
+    gap: 1.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.preview__list {
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-md);
+    background: #fff;
+    max-height: 420px;
+    overflow: auto;
+    padding: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.preview__group {
+    border: 1px solid #e2e8f0;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: #f8fafc;
+}
+
+.preview__group-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: #e2e8f0;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.preview__rows {
+    background: #fff;
+}
+
+.preview__row {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.75rem;
+    align-items: start;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.preview__row:last-child {
+    border-bottom: none;
+}
+
+.preview__row h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    color: var(--text-main);
+}
+
+.preview__row p {
+    margin: 0.15rem 0;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    word-break: break-word;
 }

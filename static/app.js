@@ -11,7 +11,18 @@ const summaryNote = document.getElementById('summary-note');
 const summaryPages = document.getElementById('summary-pages');
 const summaryErrors = document.getElementById('summary-errors');
 const summarySkipped = document.getElementById('summary-skipped');
+const loadingMessage = document.getElementById('loading-message');
+const previewList = document.getElementById('preview-list');
+const previewBtn = document.getElementById('preview-pages');
+const previewSearchInput = document.getElementById('preview-search');
+const previewHostFilter = document.getElementById('preview-host-filter');
+const previewSelectAll = document.getElementById('preview-select-all');
+const downloadSelectedBtn = document.getElementById('download-selected');
+const previewTotal = document.getElementById('preview-total');
+const previewSelected = document.getElementById('preview-selected');
+const defaultLoadingMessage = 'Crawling… this can take up to 90 seconds.';
 let pollTimer = null;
+let previewPages = [];
 
 const renderSummary = (data = {}, noteText = '') => {
     if (!summaryCard) return;
@@ -38,7 +49,7 @@ const refreshSummary = async (noteText = '') => {
     }
 };
 
-const setLoading = (isLoading) => {
+const setLoading = (isLoading, message = defaultLoadingMessage) => {
     const controls = document.querySelectorAll('input, button, select, textarea');
     controls.forEach((el) => {
         if (isLoading) {
@@ -51,9 +62,15 @@ const setLoading = (isLoading) => {
     if (isLoading) {
         overlay.classList.add('visible');
         overlay.setAttribute('aria-hidden', 'false');
+        if (loadingMessage) {
+            loadingMessage.textContent = message;
+        }
     } else {
         overlay.classList.remove('visible');
         overlay.setAttribute('aria-hidden', 'true');
+        if (loadingMessage) {
+            loadingMessage.textContent = defaultLoadingMessage;
+        }
     }
 
     generateBtn.classList.toggle('loading', isLoading);
@@ -69,22 +86,184 @@ const showError = (message) => {
     errorBox.classList.add('visible');
 };
 
-const parseFilename = (response) => {
-    const disposition = response.headers.get('Content-Disposition') || '';
-    const match = disposition.match(/filename="?([^";]+)"?/i);
-    return match ? match[1] : 'knowledgebase.md';
+const pruneEmptyFormData = (formData) => {
+    for (const [key, value] of Array.from(formData.entries())) {
+        if (typeof value === 'string' && value.trim() === '') {
+            formData.delete(key);
+        }
+    }
+    return formData;
 };
 
-const downloadBlob = async (response) => {
+const parseFilename = (response, fallback = 'knowledgebase.md') => {
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    return match ? match[1] : fallback;
+};
+
+const downloadBlob = async (response, fallbackFilename) => {
     const blob = await response.blob();
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = parseFilename(response);
+    a.download = parseFilename(response, fallbackFilename || 'knowledgebase.md');
     document.body.appendChild(a);
     a.click();
     a.remove();
     window.URL.revokeObjectURL(url);
+};
+
+const normalizeHost = (host) => host || 'Unknown host';
+
+const getFilteredPreviewPages = () => {
+    const query = (previewSearchInput?.value || '').toLowerCase().trim();
+    const hostFilter = previewHostFilter?.value || 'all';
+
+    return previewPages.filter((page) => {
+        const host = normalizeHost(page.host);
+        const matchesHost = hostFilter === 'all' || host === hostFilter;
+        const haystack = `${page.title || ''} ${page.path || ''} ${page.url || ''}`.toLowerCase();
+        const matchesSearch = !query || haystack.includes(query);
+        return matchesHost && matchesSearch;
+    });
+};
+
+const renderHostFilterOptions = () => {
+    if (!previewHostFilter) return;
+    const hosts = Array.from(new Set(previewPages.map((page) => normalizeHost(page.host)))).sort();
+    previewHostFilter.innerHTML = '<option value="all">All hosts</option>';
+    hosts.forEach((host) => {
+        const option = document.createElement('option');
+        option.value = host;
+        option.textContent = host;
+        previewHostFilter.appendChild(option);
+    });
+};
+
+const updatePreviewCounts = () => {
+    const total = previewPages.length;
+    const selectedCount = previewPages.filter((page) => page.selected).length;
+
+    if (previewTotal) previewTotal.textContent = total;
+    if (previewSelected) previewSelected.textContent = selectedCount;
+
+    if (previewSelectAll) {
+        previewSelectAll.checked = selectedCount > 0 && selectedCount === total;
+        previewSelectAll.indeterminate = selectedCount > 0 && selectedCount < total;
+    }
+
+    if (downloadSelectedBtn) {
+        downloadSelectedBtn.disabled = selectedCount === 0;
+    }
+};
+
+const setHostSelection = (hostKey, checked) => {
+    previewPages = previewPages.map((page) => ({
+        ...page,
+        selected: normalizeHost(page.host) === hostKey ? checked : page.selected,
+    }));
+    renderPreviewList();
+};
+
+const toggleSelectAll = (checked) => {
+    previewPages = previewPages.map((page) => ({ ...page, selected: checked }));
+    renderPreviewList();
+};
+
+const renderPreviewList = () => {
+    if (!previewList) return;
+    const filtered = getFilteredPreviewPages();
+    previewList.innerHTML = '';
+
+    if (!filtered.length) {
+        previewList.innerHTML = '<p class="helper">No pages match your filters.</p>';
+        updatePreviewCounts();
+        return;
+    }
+
+    const grouped = filtered.reduce((acc, page) => {
+        const host = normalizeHost(page.host);
+        acc[host] = acc[host] || [];
+        acc[host].push(page);
+        return acc;
+    }, {});
+
+    Object.keys(grouped)
+        .sort()
+        .forEach((host) => {
+            const group = document.createElement('div');
+            group.className = 'preview__group';
+
+            const header = document.createElement('div');
+            header.className = 'preview__group-header';
+
+            const title = document.createElement('div');
+            const hostName = document.createElement('h3');
+            hostName.textContent = host;
+            const hostCount = document.createElement('p');
+            hostCount.className = 'helper';
+            hostCount.textContent = `${grouped[host].length} page(s)`;
+            title.appendChild(hostName);
+            title.appendChild(hostCount);
+
+            const hostToggleLabel = document.createElement('label');
+            hostToggleLabel.className = 'checkbox';
+            const hostToggle = document.createElement('input');
+            hostToggle.type = 'checkbox';
+            const hostPages = grouped[host];
+            const hostAllSelected = hostPages.every((page) => page.selected);
+            const hostSomeSelected = hostPages.some((page) => page.selected);
+            hostToggle.checked = hostAllSelected;
+            hostToggle.indeterminate = !hostAllSelected && hostSomeSelected;
+            hostToggle.addEventListener('change', (event) => {
+                setHostSelection(host, event.target.checked);
+            });
+            hostToggleLabel.appendChild(hostToggle);
+            const hostToggleText = document.createElement('span');
+            hostToggleText.textContent = hostAllSelected ? 'Unselect host' : 'Select host';
+            hostToggleLabel.appendChild(hostToggleText);
+
+            header.appendChild(title);
+            header.appendChild(hostToggleLabel);
+
+            const rows = document.createElement('div');
+            rows.className = 'preview__rows';
+
+            hostPages.forEach((page) => {
+                const row = document.createElement('div');
+                row.className = 'preview__row';
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = !!page.selected;
+                checkbox.addEventListener('change', (event) => {
+                    page.selected = event.target.checked;
+                    renderPreviewList();
+                });
+
+                const info = document.createElement('div');
+                const pageTitle = document.createElement('h3');
+                pageTitle.textContent = page.title || page.path || page.url || 'Page';
+                const path = document.createElement('p');
+                path.textContent = page.path || page.url || '';
+                const filename = document.createElement('p');
+                filename.textContent = page.suggested_filename ? `File: ${page.suggested_filename}` : '';
+
+                info.appendChild(pageTitle);
+                if (path.textContent) info.appendChild(path);
+                if (filename.textContent) info.appendChild(filename);
+
+                row.appendChild(checkbox);
+                row.appendChild(info);
+                rows.appendChild(row);
+            });
+
+            group.appendChild(header);
+            group.appendChild(rows);
+            previewList.appendChild(group);
+        });
+
+    updatePreviewCounts();
 };
 
 const pollDiagnostics = () => {
@@ -120,18 +299,11 @@ const handleSubmit = async (event) => {
     setLoading(true);
     pollDiagnostics();
 
-    const formData = new FormData(crawlForm);
+    const formData = pruneEmptyFormData(new FormData(crawlForm));
     if (mode === 'zip') {
         formData.set('mode', 'zip');
     } else {
         formData.delete('mode');
-    }
-
-    // Remove empty fields to prevent parsing errors with empty multipart parts
-    for (const [key, value] of Array.from(formData.entries())) {
-        if (typeof value === 'string' && value.trim() === '') {
-            formData.delete(key);
-        }
     }
 
     try {
@@ -175,6 +347,171 @@ const handleSubmit = async (event) => {
     } finally {
         setLoading(false);
         stopPolling();
+    }
+};
+
+const toList = (value) => {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== 'string') return [];
+    return value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+};
+
+const getCheckboxValue = (name, defaultValue) => {
+    const input = crawlForm?.elements[name];
+    if (!input) return defaultValue;
+    if (input.type === 'checkbox') return input.checked;
+    const value = input.value;
+    if (value === undefined || value === null || value === '') return defaultValue;
+    return value === 'true' || value === 'on' || value === '1';
+};
+
+const getNumberValue = (name, defaultValue) => {
+    const input = crawlForm?.elements[name];
+    if (!input) return defaultValue;
+    const value = Number(input.value);
+    return Number.isFinite(value) ? value : defaultValue;
+};
+
+const buildDownloadPayload = (pages) => {
+    const formData = pruneEmptyFormData(new FormData(crawlForm));
+
+    return {
+        url: formData.get('url') || '',
+        max_pages: getNumberValue('max_pages', 10),
+        max_depth: getNumberValue('max_depth', 3),
+        allowed_hosts: toList(formData.get('allowed_hosts')),
+        path_prefixes: toList(formData.get('path_prefixes')),
+        include_subdomains: getCheckboxValue('include_subdomains', false),
+        respect_robots: getCheckboxValue('respect_robots', true),
+        use_sitemap: getCheckboxValue('use_sitemap', true),
+        strip_links: getCheckboxValue('strip_links', true),
+        strip_images: getCheckboxValue('strip_images', true),
+        readability_fallback: getCheckboxValue('readability_fallback', true),
+        min_text_chars: getNumberValue('min_text_chars', 600),
+        render_mode: formData.get('render_mode') || 'http',
+        pages,
+    };
+};
+
+const handlePreviewClick = async () => {
+    if (!crawlForm) return;
+    showError('');
+    progressText.textContent = 'Preparing preview…';
+    setLoading(true, 'Previewing pages…');
+
+    const formData = pruneEmptyFormData(new FormData(crawlForm));
+
+    try {
+        const response = await fetch('/crawl-preview', {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            let message = 'Unable to load preview.';
+            try {
+                const data = await response.json();
+                if (data?.detail) {
+                    message = typeof data.detail === 'string' ? data.detail : data.detail.message || message;
+                }
+            } catch (_) {
+                // ignore JSON parse issues
+            }
+            showError(message);
+            if (previewList) {
+                previewList.innerHTML = `<p class="helper">${message}</p>`;
+            }
+            progressText.textContent = 'Preview failed.';
+            previewPages = [];
+            updatePreviewCounts();
+            return;
+        }
+
+        const data = await response.json();
+        if (!Array.isArray(data)) {
+            throw new Error('Unexpected preview response.');
+        }
+
+        previewPages = data.map((page) => ({ ...page, selected: true }));
+        renderHostFilterOptions();
+        renderPreviewList();
+        progressText.textContent = `Preview ready. Found ${previewPages.length} pages.`;
+    } catch (err) {
+        console.error('Preview failed', err);
+        showError('Unable to load preview: ' + err.message);
+        if (previewList) {
+            previewList.innerHTML = '<p class="helper">Preview failed. Please try again.</p>';
+        }
+        progressText.textContent = 'Preview failed.';
+        previewPages = [];
+        updatePreviewCounts();
+    } finally {
+        setLoading(false);
+    }
+};
+
+const handleDownloadSelected = async () => {
+    const selectedPages = previewPages
+        .filter((page) => page.selected)
+        .map((page) => ({
+            url: page.url,
+            host: page.host,
+            path: page.path,
+            title: page.title,
+            filename: page.suggested_filename,
+        }));
+
+    if (!selectedPages.length) {
+        showError('Select at least one page to download.');
+        return;
+    }
+
+    const payload = buildDownloadPayload(selectedPages);
+    if (!payload.url) {
+        showError('Please provide a URL before downloading.');
+        return;
+    }
+
+    showError('');
+    progressText.textContent = 'Downloading selected pages…';
+    setLoading(true, 'Downloading selected pages…');
+
+    try {
+        const response = await fetch('/download-selected', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            let message = 'Unable to download selection.';
+            try {
+                const data = await response.json();
+                if (data?.detail) {
+                    message = typeof data.detail === 'string' ? data.detail : data.detail.message || message;
+                }
+            } catch (_) {
+                // ignore JSON parse issues
+            }
+            showError(message);
+            progressText.textContent = 'Download failed. Please review errors and try again.';
+            return;
+        }
+
+        await downloadBlob(response, 'knowledgebase_pages.zip');
+        progressText.textContent = 'Download ready. Check your files.';
+        await refreshSummary('Download ready.');
+    } catch (err) {
+        console.error('Download failed', err);
+        showError('Unable to download selection: ' + err.message);
+        progressText.textContent = 'Download failed. Please try again.';
+    } finally {
+        setLoading(false);
     }
 };
 
@@ -239,4 +576,10 @@ const loadDiagnostics = async () => {
 
 crawlForm?.addEventListener('submit', handleSubmit);
 loadDiagnosticsBtn?.addEventListener('click', loadDiagnostics);
+previewBtn?.addEventListener('click', handlePreviewClick);
+downloadSelectedBtn?.addEventListener('click', handleDownloadSelected);
+previewSearchInput?.addEventListener('input', renderPreviewList);
+previewHostFilter?.addEventListener('change', renderPreviewList);
+previewSelectAll?.addEventListener('change', (event) => toggleSelectAll(event.target.checked));
 refreshSummary('Awaiting first run.');
+updatePreviewCounts();
