@@ -12,6 +12,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, Up
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from connectors.importer import ImportConnector
 from crawler import AsyncCrawler
@@ -241,52 +242,86 @@ def _parse_render_mode(value: str | None) -> str:
     return "http"
 
 
+class CrawlRequest(BaseModel):
+    url: str
+    max_pages: int = 10
+    allowed_hosts: List[str] = Field(default_factory=list)
+    path_prefixes: List[str] = Field(default_factory=list)
+    include_subdomains: bool = False
+    respect_robots: bool = True
+    use_sitemap: bool = True
+    max_depth: int = 3
+    strip_links: bool = True
+    strip_images: bool = True
+    readability_fallback: bool = True
+    min_text_chars: int = 600
+    render_mode: str = "http"
+
+
+class DownloadRequest(CrawlRequest):
+    pages: List[dict] = Field(default_factory=list)
+
+
+@app.post("/download-selected")
+async def download_selected(request: DownloadRequest):
+    if not request.url:
+        raise HTTPException(status_code=400, detail="URL is required.")
+    if not request.pages:
+        raise HTTPException(status_code=400, detail="No pages selected.")
+
+    safe_url = _ensure_public_url(request.url)
+    pages_to_crawl = _validate_max_pages(request.max_pages)
+    
+    # Use request fields for crawler initialization
+    crawler = AsyncCrawler(
+        start_url=safe_url,
+        max_pages=pages_to_crawl,
+        include_subdomains=request.include_subdomains,
+        allowed_hosts=request.allowed_hosts,
+        path_prefixes=request.path_prefixes,
+        respect_robots=request.respect_robots,
+        use_sitemap=request.use_sitemap,
+        max_depth=request.max_depth,
+        strip_links=request.strip_links,
+        strip_images=request.strip_images,
+        readability_fallback=request.readability_fallback,
+        min_text_chars=request.min_text_chars,
+        render_mode=request.render_mode,
+        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
+        max_concurrent_requests=MAX_CONCURRENCY,
+    )
+
+    buffer = io.BytesIO()
+    added_files = 0
+
+    async with crawler._create_client() as client:
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for page in request.pages:
+                page_url = page.get("url")
 @app.post("/generate")
-async def generate_knowledgebase(
-    url: str = Form(...),
-    max_pages: int | None = Form(10),
-    allowed_hosts: str = Form(""),
-    path_prefixes: str = Form(""),
-    include_subdomains: str | None = Form("false"),
-    respect_robots: str | None = Form("true"),
-    use_sitemap: str | None = Form("true"),
-    max_depth: int | None = Form(3),
-    strip_links: str | None = Form("true"),
-    strip_images: str | None = Form("true"),
-    readability_fallback: str | None = Form("true"),
-    min_text_chars: int | None = Form(600),
-    render_mode: str | None = Form("http"),
-):
-    if not url:
+async def generate_knowledgebase(request: CrawlRequest):
+    if not request.url:
         raise HTTPException(status_code=400, detail="URL is required.")
 
-    safe_url = _ensure_public_url(url)
+    safe_url = _ensure_public_url(request.url)
 
-    pages_to_crawl = _validate_max_pages(max_pages)
-    allowed = _parse_list_field(allowed_hosts)
-    prefixes = _parse_list_field(path_prefixes)
-    include_subdomains_bool = _parse_bool_field(include_subdomains, False)
-    respect_robots_bool = _parse_bool_field(respect_robots, True)
-    use_sitemap_bool = _parse_bool_field(use_sitemap, True)
-    depth_value = _clamp_max_depth(max_depth)
-    strip_links_bool = _parse_bool_field(strip_links, True)
-    strip_images_bool = _parse_bool_field(strip_images, True)
-    readability_bool = _parse_bool_field(readability_fallback, True)
-    min_text_value = _clamp_min_text_chars(min_text_chars)
-    render_mode_value = _parse_render_mode(render_mode)
+    pages_to_crawl = _validate_max_pages(request.max_pages)
+    depth_value = _clamp_max_depth(request.max_depth)
+    min_text_value = _clamp_min_text_chars(request.min_text_chars)
+    render_mode_value = _parse_render_mode(request.render_mode)
 
     crawler = AsyncCrawler(
         start_url=safe_url,
         max_pages=pages_to_crawl,
-        include_subdomains=include_subdomains_bool,
-        allowed_hosts=allowed,
-        path_prefixes=prefixes,
-        respect_robots=respect_robots_bool,
-        use_sitemap=use_sitemap_bool,
+        include_subdomains=request.include_subdomains,
+        allowed_hosts=request.allowed_hosts,
+        path_prefixes=request.path_prefixes,
+        respect_robots=request.respect_robots,
+        use_sitemap=request.use_sitemap,
         max_depth=depth_value,
-        strip_links=strip_links_bool,
-        strip_images=strip_images_bool,
-        readability_fallback=readability_bool,
+        strip_links=request.strip_links,
+        strip_images=request.strip_images,
+        readability_fallback=request.readability_fallback,
         min_text_chars=min_text_value,
         render_mode=render_mode_value,
         crawl_timeout=CRAWL_TIMEOUT_SECONDS,
@@ -309,7 +344,7 @@ async def generate_knowledgebase(
             },
         )
 
-    parsed = urlparse(url)
+    parsed = urlparse(request.url)
     hostname = _slugify(parsed.hostname or "output")
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
@@ -327,51 +362,29 @@ async def generate_knowledgebase(
 
 
 @app.post("/crawl-preview")
-async def crawl_preview(
-    url: str = Form(...),
-    max_pages: int | None = Form(10),
-    allowed_hosts: str | None = Form(None),
-    path_prefixes: str | None = Form(None),
-    include_subdomains: str | None = Form("false"),
-    respect_robots: str | None = Form("true"),
-    use_sitemap: str | None = Form("true"),
-    max_depth: int | None = Form(3),
-    strip_links: str | None = Form("true"),
-    strip_images: str | None = Form("true"),
-    readability_fallback: str | None = Form("true"),
-    min_text_chars: int | None = Form(600),
-    render_mode: str | None = Form("http"),
-):
-    if not url:
+async def crawl_preview(request: CrawlRequest):
+    if not request.url:
         raise HTTPException(status_code=400, detail="URL is required.")
 
-    safe_url = _ensure_public_url(url)
+    safe_url = _ensure_public_url(request.url)
 
-    pages_to_crawl = _validate_max_pages(max_pages)
-    allowed = _parse_list_field(allowed_hosts)
-    prefixes = _parse_list_field(path_prefixes)
-    include_subdomains_bool = _parse_bool_field(include_subdomains, False)
-    respect_robots_bool = _parse_bool_field(respect_robots, True)
-    use_sitemap_bool = _parse_bool_field(use_sitemap, True)
-    depth_value = _clamp_max_depth(max_depth)
-    strip_links_bool = _parse_bool_field(strip_links, True)
-    strip_images_bool = _parse_bool_field(strip_images, True)
-    readability_bool = _parse_bool_field(readability_fallback, True)
-    min_text_value = _clamp_min_text_chars(min_text_chars)
-    render_mode_value = _parse_render_mode(render_mode)
+    pages_to_crawl = _validate_max_pages(request.max_pages)
+    depth_value = _clamp_max_depth(request.max_depth)
+    min_text_value = _clamp_min_text_chars(request.min_text_chars)
+    render_mode_value = _parse_render_mode(request.render_mode)
 
     crawler = AsyncCrawler(
         start_url=safe_url,
         max_pages=pages_to_crawl,
-        include_subdomains=include_subdomains_bool,
-        allowed_hosts=allowed,
-        path_prefixes=prefixes,
-        respect_robots=respect_robots_bool,
-        use_sitemap=use_sitemap_bool,
+        include_subdomains=request.include_subdomains,
+        allowed_hosts=request.allowed_hosts,
+        path_prefixes=request.path_prefixes,
+        respect_robots=request.respect_robots,
+        use_sitemap=request.use_sitemap,
         max_depth=depth_value,
-        strip_links=strip_links_bool,
-        strip_images=strip_images_bool,
-        readability_fallback=readability_bool,
+        strip_links=request.strip_links,
+        strip_images=request.strip_images,
+        readability_fallback=request.readability_fallback,
         min_text_chars=min_text_value,
         render_mode=render_mode_value,
         crawl_timeout=CRAWL_TIMEOUT_SECONDS,
@@ -406,85 +419,7 @@ async def crawl_preview(
     return preview
 
 
-@app.post("/download-selected")
-async def download_selected(payload=Body(...)):
-    url = payload.get("url")
-    max_pages = payload.get("max_pages", 10)
-    allowed_hosts = payload.get("allowed_hosts") or []
-    path_prefixes = payload.get("path_prefixes") or []
-    include_subdomains = _parse_bool_field(payload.get("include_subdomains"), False)
-    respect_robots = _parse_bool_field(payload.get("respect_robots"), True)
-    use_sitemap = _parse_bool_field(payload.get("use_sitemap"), True)
-    max_depth = _clamp_max_depth(payload.get("max_depth"))
-    pages = payload.get("pages", [])
-    strip_links = _parse_bool_field(payload.get("strip_links"), True)
-    strip_images = _parse_bool_field(payload.get("strip_images"), True)
-    readability_fallback = _parse_bool_field(payload.get("readability_fallback"), True)
-    min_text_chars = _clamp_min_text_chars(payload.get("min_text_chars"))
-    render_mode = _parse_render_mode(payload.get("render_mode"))
 
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required.")
-    if not pages:
-        raise HTTPException(status_code=400, detail="No pages selected.")
-
-    safe_url = _ensure_public_url(url)
-    pages_to_crawl = _validate_max_pages(max_pages)
-
-    crawler = AsyncCrawler(
-        start_url=safe_url,
-        max_pages=pages_to_crawl,
-        include_subdomains=include_subdomains,
-        allowed_hosts=allowed_hosts,
-        path_prefixes=path_prefixes,
-        respect_robots=respect_robots,
-        use_sitemap=use_sitemap,
-        max_depth=max_depth,
-        strip_links=strip_links,
-        strip_images=strip_images,
-        readability_fallback=readability_fallback,
-        min_text_chars=min_text_chars,
-        render_mode=render_mode,
-        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
-        max_concurrent_requests=MAX_CONCURRENCY,
-    )
-
-    buffer = io.BytesIO()
-    added_files = 0
-
-    async with crawler._create_client() as client:
-        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-            for page in pages:
-                page_url = page.get("url")
-                filename = page.get("filename") or f"page-{added_files}.md"
-                if not page_url:
-                    continue
-
-                if not await crawler._can_visit_url(client, page_url):
-                    continue
-
-                rendered = await crawler._render_page(client, page_url)
-                if not rendered:
-                    continue
-
-                _, title, markdown, _, _, final_url = rendered
-                host = page.get("host") or (urlparse(final_url).hostname or "")
-                heading = page.get("title") or page.get("path") or title
-
-                body = f"# {host}\n## {heading}\n\n{markdown}"
-                normalized_body = crawler._postprocess_markdown(body)
-                zip_file.writestr(filename, normalized_body)
-                added_files += 1
-
-    if added_files == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="No pages could be downloaded with the provided selection.",
-        )
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="knowledgebase_pages.zip"'}
-    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
 
 
 def _build_index_markdown(pages: List) -> str:

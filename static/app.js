@@ -299,17 +299,21 @@ const handleSubmit = async (event) => {
     setLoading(true);
     pollDiagnostics();
 
-    const formData = pruneEmptyFormData(new FormData(crawlForm));
-    if (mode === 'zip') {
-        formData.set('mode', 'zip');
-    } else {
-        formData.delete('mode');
+    const payload = buildCrawlPayload();
+    if (!payload.url) {
+        stopPolling();
+        setLoading(false);
+        showError('Website URL is required.');
+        return;
     }
 
     try {
         const response = await fetch('/generate', {
             method: 'POST',
-            body: formData,
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
         });
 
         stopPolling();
@@ -350,12 +354,12 @@ const handleSubmit = async (event) => {
     }
 };
 
-const toList = (value) => {
+const toListFlexible = (value) => {
     if (Array.isArray(value)) return value;
     if (typeof value !== 'string') return [];
     return value
-        .split(',')
-        .map((item) => item.trim())
+        .split(/[, \n\r\t]+/)
+        .map((s) => s.trim())
         .filter(Boolean);
 };
 
@@ -375,15 +379,15 @@ const getNumberValue = (name, defaultValue) => {
     return Number.isFinite(value) ? value : defaultValue;
 };
 
-const buildDownloadPayload = (pages) => {
+const buildCrawlPayload = () => {
     const formData = pruneEmptyFormData(new FormData(crawlForm));
 
     return {
-        url: formData.get('url') || '',
+        url: (formData.get('url') || '').toString().trim(),
         max_pages: getNumberValue('max_pages', 10),
         max_depth: getNumberValue('max_depth', 3),
-        allowed_hosts: toList(formData.get('allowed_hosts')),
-        path_prefixes: toList(formData.get('path_prefixes')),
+        allowed_hosts: toListFlexible(formData.get('allowed_hosts')),
+        path_prefixes: toListFlexible(formData.get('path_prefixes')),
         include_subdomains: getCheckboxValue('include_subdomains', false),
         respect_robots: getCheckboxValue('respect_robots', true),
         use_sitemap: getCheckboxValue('use_sitemap', true),
@@ -391,8 +395,7 @@ const buildDownloadPayload = (pages) => {
         strip_images: getCheckboxValue('strip_images', true),
         readability_fallback: getCheckboxValue('readability_fallback', true),
         min_text_chars: getNumberValue('min_text_chars', 600),
-        render_mode: formData.get('render_mode') || 'http',
-        pages,
+        render_mode: (formData.get('render_mode') || 'http').toString(),
     };
 };
 
@@ -402,12 +405,20 @@ const handlePreviewClick = async () => {
     progressText.textContent = 'Preparing preview…';
     setLoading(true, 'Previewing pages…');
 
-    const formData = pruneEmptyFormData(new FormData(crawlForm));
+    const payload = buildCrawlPayload();
+    if (!payload.url) {
+        showError('Website URL is required for preview.');
+        setLoading(false);
+        return;
+    }
 
     try {
         const response = await fetch('/crawl-preview', {
             method: 'POST',
-            body: formData,
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
         });
 
         if (!response.ok) {
