@@ -111,6 +111,53 @@
                 </form>
             </section>
 
+            <section class="card" id="preview-card">
+                <div class="card__header">
+                    <div>
+                        <p class="eyebrow">Card 1.5</p>
+                        <h2>Page selection preview</h2>
+                        <p class="subtitle">Preview discovered pages, filter by host, and download only what you need.</p>
+                    </div>
+                </div>
+
+                <div class="stack">
+                    <div class="actions actions--wrap">
+                        <button type="button" class="btn secondary" id="preview-pages">
+                            <span>Preview pages</span>
+                        </button>
+                        <button type="button" class="btn ghost" id="download-selected" disabled>
+                            Download selected as ZIP
+                        </button>
+                    </div>
+
+                    <div class="preview__controls">
+                        <div class="field">
+                            <label for="preview-search">Search pages</label>
+                            <input id="preview-search" type="text" placeholder="Filter by title, path, or URL" autocomplete="off">
+                        </div>
+                        <div class="field">
+                            <label for="preview-host-filter">Filter by host</label>
+                            <select id="preview-host-filter">
+                                <option value="all">All hosts</option>
+                            </select>
+                        </div>
+                        <label class="checkbox preview__select-all" for="preview-select-all">
+                            <input type="checkbox" id="preview-select-all">
+                            <span>Select all</span>
+                        </label>
+                    </div>
+
+                    <div class="preview__meta">
+                        <p class="helper">Preview pages: <strong id="preview-total">0</strong></p>
+                        <p class="helper">Selected: <strong id="preview-selected">0</strong></p>
+                    </div>
+
+                    <div class="preview__list" id="preview-list">
+                        <p class="helper">Click "Preview pages" to see crawl candidates.</p>
+                    </div>
+                </div>
+            </section>
+
             <section class="card">
                 <div class="card__header">
                     <div>
