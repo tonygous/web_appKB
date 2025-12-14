@@ -186,7 +186,7 @@ def _clamp_max_depth(raw_value: int | None) -> int:
         value = int(raw_value)
     except (TypeError, ValueError):
         return 3
-    return max(1, min(value, 10))
+    return max(1, min(value, 6))
 
 
 def _update_last_run(crawler: AsyncCrawler, pages: List, total_chars: int) -> None:
@@ -209,9 +209,8 @@ def _validate_max_pages(raw_value: int | None) -> int:
         pages = int(raw_value) if raw_value is not None else 10
     except (TypeError, ValueError):
         pages = 1
-    if pages > 500:
-        raise HTTPException(status_code=400, detail="max_pages cannot exceed 500")
-    return max(1, pages)
+    pages = max(1, pages)
+    return min(pages, 500)
 
 
 def _ensure_public_url(url: str) -> str:
@@ -242,15 +241,41 @@ def _parse_render_mode(value: str | None) -> str:
     return "http"
 
 
-class CrawlRequest(BaseModel):
+def _build_crawler_from_config(config: CrawlConfig) -> AsyncCrawler:
+    safe_url = _ensure_public_url(config.url)
+    pages_to_crawl = _validate_max_pages(config.max_pages)
+    depth_value = _clamp_max_depth(config.max_depth)
+    min_text_value = _clamp_min_text_chars(config.min_text_chars)
+    render_mode_value = _parse_render_mode(config.render_mode)
+
+    return AsyncCrawler(
+        start_url=safe_url,
+        max_pages=pages_to_crawl,
+        include_subdomains=config.include_subdomains,
+        allowed_hosts=config.allowed_hosts,
+        path_prefixes=config.path_prefixes,
+        respect_robots=config.respect_robots,
+        use_sitemap=config.use_sitemap,
+        max_depth=depth_value,
+        strip_links=config.strip_links,
+        strip_images=config.strip_images,
+        readability_fallback=config.readability_fallback,
+        min_text_chars=min_text_value,
+        render_mode=render_mode_value,
+        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
+        max_concurrent_requests=MAX_CONCURRENCY,
+    )
+
+
+class CrawlConfig(BaseModel):
     url: str
     max_pages: int = 10
+    max_depth: int = 3
     allowed_hosts: List[str] = Field(default_factory=list)
     path_prefixes: List[str] = Field(default_factory=list)
     include_subdomains: bool = False
     respect_robots: bool = True
     use_sitemap: bool = True
-    max_depth: int = 3
     strip_links: bool = True
     strip_images: bool = True
     readability_fallback: bool = True
@@ -258,8 +283,35 @@ class CrawlRequest(BaseModel):
     render_mode: str = "http"
 
 
+class ScanPage(BaseModel):
+    url: str
+    host: str
+    path: str
+    title: str | None = None
+    depth: int | None = None
+    text_chars: int | None = None
+    suggested_filename: str
+
+
+class ScanResponse(BaseModel):
+    pages: List[ScanPage]
+    hosts: List[str]
+    total_found: int
+    truncated: bool = False
+
+
+class CrawlRequest(CrawlConfig):
+    pass
+
+
 class DownloadRequest(CrawlRequest):
     pages: List[dict] = Field(default_factory=list)
+
+
+class DownloadPayload(BaseModel):
+    config: CrawlConfig
+    selected_urls: List[str]
+    mode: str = Field(default="combined", pattern="^(combined|zip)$")
 
 
 @app.post("/download-selected")
