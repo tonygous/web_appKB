@@ -293,6 +293,11 @@ const handleSubmit = async (event) => {
     const submitter = event.submitter || generateBtn;
     const mode = submitter?.value === 'zip' ? 'zip' : 'combined';
 
+    if (mode === 'zip') {
+        await handleGenerateZip();
+        return;
+    }
+
     showError('');
     progressText.textContent = 'Crawling… this can take up to 90 seconds';
     renderSummary({ pages_count: 0, errors: [], skipped_links: 0, timed_out: false }, 'Starting crawl…');
@@ -399,6 +404,11 @@ const buildCrawlPayload = () => {
     };
 };
 
+const buildDownloadPayload = (pages = []) => ({
+    ...buildCrawlPayload(),
+    pages,
+});
+
 const handlePreviewClick = async () => {
     if (!crawlForm) return;
     showError('');
@@ -472,7 +482,7 @@ const handleDownloadSelected = async () => {
             host: page.host,
             path: page.path,
             title: page.title,
-            filename: page.suggested_filename,
+            suggested_filename: page.suggested_filename,
         }));
 
     if (!selectedPages.length) {
@@ -521,6 +531,100 @@ const handleDownloadSelected = async () => {
         console.error('Download failed', err);
         showError('Unable to download selection: ' + err.message);
         progressText.textContent = 'Download failed. Please try again.';
+    } finally {
+        setLoading(false);
+    }
+};
+
+const handleGenerateZip = async () => {
+    showError('');
+    progressText.textContent = 'Generating ZIP… this may take up to 90 seconds';
+    setLoading(true, 'Generating ZIP…');
+
+    const crawlPayload = buildCrawlPayload();
+    if (!crawlPayload.url) {
+        showError('Website URL is required to generate ZIP.');
+        setLoading(false);
+        return;
+    }
+
+    try {
+        const previewResponse = await fetch('/crawl-preview', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(crawlPayload),
+        });
+
+        if (!previewResponse.ok) {
+            let message = 'Unable to prepare ZIP.';
+            try {
+                const data = await previewResponse.json();
+                if (data?.detail) {
+                    message = typeof data.detail === 'string' ? data.detail : data.detail.message || message;
+                }
+            } catch (_) {
+                // ignore JSON parse issues
+            }
+            showError(message);
+            progressText.textContent = 'ZIP generation failed during preview.';
+            return;
+        }
+
+        const previewData = await previewResponse.json();
+        if (!Array.isArray(previewData) || previewData.length === 0) {
+            showError('No pages found to include in ZIP.');
+            progressText.textContent = 'ZIP generation failed: no pages found.';
+            previewPages = [];
+            renderPreviewList();
+            return;
+        }
+
+        previewPages = previewData.map((page) => ({ ...page, selected: true }));
+        renderHostFilterOptions();
+        renderPreviewList();
+
+        const downloadPayload = buildDownloadPayload(
+            previewPages.map((page) => ({
+                url: page.url,
+                host: page.host,
+                path: page.path,
+                title: page.title,
+                suggested_filename: page.suggested_filename,
+            }))
+        );
+
+        const downloadResponse = await fetch('/download-selected', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(downloadPayload),
+        });
+
+        if (!downloadResponse.ok) {
+            let message = 'Unable to download ZIP.';
+            try {
+                const data = await downloadResponse.json();
+                if (data?.detail) {
+                    message = typeof data.detail === 'string' ? data.detail : data.detail.message || message;
+                }
+            } catch (_) {
+                // ignore JSON parse issues
+            }
+            showError(message);
+            progressText.textContent = 'ZIP download failed. Please review errors and try again.';
+            return;
+        }
+
+        await downloadBlob(downloadResponse, 'knowledgebase_pages.zip');
+        progressText.textContent = 'ZIP ready. Check your files.';
+        await refreshSummary('ZIP ready.');
+    } catch (err) {
+        console.error('ZIP generation failed', err);
+        showError('Unable to generate ZIP: ' + err.message);
+        progressText.textContent = 'ZIP generation failed. Please try again.';
     } finally {
         setLoading(false);
     }

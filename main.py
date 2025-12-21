@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import ipaddress
 import re
@@ -154,6 +156,30 @@ def _slugify(value: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", value)
     value = re.sub(r"-+", "-", value).strip("-")
     return value or "page"
+
+
+def _safe_markdown_filename(
+    raw_value: str | None,
+    *,
+    host: str | None,
+    title: str | None,
+    path: str | None,
+    url: str | None,
+) -> str:
+    host_slug = _slugify(host or "")
+    cleaned = (raw_value or "").strip().replace("\\", "/").split("/")[-1]
+
+    if cleaned:
+        stem = _slugify(Path(cleaned).stem)
+    else:
+        stem = ""
+
+    fallback_slug = _slugify(title or path or url or "page") or "page"
+    final_stem = stem or fallback_slug
+    if host_slug:
+        final_stem = f"{host_slug}__{final_stem}"
+
+    return f"{final_stem}.md"
 
 
 def _parse_bool_field(value: str | None, default: bool) -> bool:
@@ -321,35 +347,60 @@ async def download_selected(request: DownloadRequest):
     if not request.pages:
         raise HTTPException(status_code=400, detail="No pages selected.")
 
-    safe_url = _ensure_public_url(request.url)
-    pages_to_crawl = _validate_max_pages(request.max_pages)
-    
-    # Use request fields for crawler initialization
-    crawler = AsyncCrawler(
-        start_url=safe_url,
-        max_pages=pages_to_crawl,
-        include_subdomains=request.include_subdomains,
-        allowed_hosts=request.allowed_hosts,
-        path_prefixes=request.path_prefixes,
-        respect_robots=request.respect_robots,
-        use_sitemap=request.use_sitemap,
-        max_depth=request.max_depth,
-        strip_links=request.strip_links,
-        strip_images=request.strip_images,
-        readability_fallback=request.readability_fallback,
-        min_text_chars=request.min_text_chars,
-        render_mode=request.render_mode,
-        crawl_timeout=CRAWL_TIMEOUT_SECONDS,
-        max_concurrent_requests=MAX_CONCURRENCY,
-    )
+    crawler = _build_crawler_from_config(request)
 
     buffer = io.BytesIO()
-    added_files = 0
+    rendered_pages = []
 
     async with crawler._create_client() as client:
         with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
             for page in request.pages:
+                if not isinstance(page, dict):
+                    continue
+
                 page_url = page.get("url")
+                if not page_url:
+                    continue
+
+                fetched_page = await crawler.fetch_and_clean_page(client, page_url)
+                if not fetched_page:
+                    continue
+
+                filename = _safe_markdown_filename(
+                    page.get("suggested_filename") or page.get("filename"),
+                    host=page.get("host") or fetched_page.host,
+                    title=page.get("title") or fetched_page.title,
+                    path=page.get("path") or fetched_page.path,
+                    url=fetched_page.url,
+                )
+
+                rendered_pages.append(
+                    {
+                        "filename": filename,
+                        "title": page.get("title") or fetched_page.title,
+                        "path": page.get("path") or fetched_page.path,
+                        "url": fetched_page.url,
+                        "host": page.get("host") or fetched_page.host,
+                    }
+                )
+
+                zip_file.writestr(filename, fetched_page.markdown)
+
+            if rendered_pages:
+                index_markdown = _build_index_markdown(rendered_pages)
+                zip_file.writestr("index.md", index_markdown)
+
+    if not rendered_pages:
+        raise HTTPException(
+            status_code=400,
+            detail="No pages could be processed for the selected items.",
+        )
+
+    buffer.seek(0)
+    headers = {"Content-Disposition": 'attachment; filename="knowledgebase_pages.zip"'}
+    return StreamingResponse(buffer, media_type="application/zip", headers=headers)
+
+
 @app.post("/generate")
 async def generate_knowledgebase(request: CrawlRequest):
     if not request.url:
